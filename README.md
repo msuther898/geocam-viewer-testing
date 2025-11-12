@@ -3,9 +3,18 @@ Geocam shot viewer web component for displaying shots captured by a geocam rig.
 
 ## Live demo / GitHub Pages
 
-The repository now ships with a ready-to-host `index.html` at the project root. Open the file
-directly after running `npm run build`, or deploy the repository to GitHub Pages / Vercel and visit
-`https://<your-domain>/index.html` to try the viewer together with the Depth Anything overlay.
+The repository now ships with a ready-to-host `index.html` at the project root. Run `npm run build`
+and deploy the generated `dist/` folder to any static host – the output includes an `index.html`
+entry point together with the bundled viewer assets, so `/` serves the demo automatically.
+
+### Deploying to Vercel
+
+1. Ensure your project root contains this repository's `index.html` (it should sit alongside
+   `package.json`).
+2. Set the build command to `npm run build` and the output directory to `dist`.
+3. Add the provided `vercel.json` so single-page rewrites resolve back to `index.html`.
+4. Trigger a deployment – the `dist/index.html` file will now appear in Vercel's static asset list
+   and load without a 404 at `/`.
 
 ### Hugging Face access tokens
 
