@@ -434,6 +434,15 @@ export const depthAnythingPlugin = (options = {}) => {
       depthReady = false;
       toggleButton.disabled = true;
       downloadButton.disabled = true;
+      if (
+        err &&
+        typeof err.message === "string" &&
+        /unauthorized/i.test(err.message)
+      ) {
+        refreshTokenUI(
+          "Model download was rejected. Save an hf_ token to authorize Hugging Face requests."
+        );
+      }
     } finally {
       if (currentRun === runId) {
         running = false;
@@ -584,11 +593,17 @@ export const depthAnythingPlugin = (options = {}) => {
         if (!tokenInput) return;
         const nextToken = tokenInput.value.trim();
         storeToken(nextToken);
-        refreshTokenUI(
-          nextToken
-            ? "Token saved. Authorization will be sent to huggingface.co."
-            : "Token cleared. Public models only."
-        );
+        estimatorPromise = null;
+        if (nextToken) {
+          refreshTokenUI(
+            "Token saved. Authorization will be sent to huggingface.co."
+          );
+          setStatus("Token saved. Reloading depth…");
+          void runDepth(true);
+        } else {
+          refreshTokenUI("Token cleared. Public models only.");
+          setStatus("Token cleared. Depth models may require authorization.");
+        }
       };
 
       handleTokenKeydown = (event) => {
