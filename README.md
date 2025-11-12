@@ -7,6 +7,14 @@ The repository now ships with a ready-to-host `index.html` at the project root. 
 directly after running `npm run build`, or deploy the repository to GitHub Pages / Vercel and visit
 `https://<your-domain>/index.html` to try the viewer together with the Depth Anything overlay.
 
+### Hugging Face access tokens
+
+Depth estimation models are hosted on Hugging Face. When you open the demo page you will see a new
+token field in the depth overlay control panel. Paste an `hf_...` access token there and click
+**Save Token** – the value is stored in `localStorage`, applied to the Transformers.js environment,
+and automatically attached to every request targeting `huggingface.co`. Leave the field blank if you
+only need public models; you can clear the saved token at any time by saving an empty value.
+
 ### NPM Installation:
 ```
 npm install 'https://gitpkg.now.sh/geocamxyz/geocam-viewer/src?v2.0.3'

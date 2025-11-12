@@ -1,5 +1,107 @@
 import { injectStyle } from "./utilities.js";
 
+const TOKEN_STORAGE_KEY = "geocam-depth-anything-hf-token";
+let cachedToken;
+let tokenLoaded = false;
+let fetchPatched = false;
+let transformersEnv = null;
+
+function readStoredToken() {
+  if (!tokenLoaded) {
+    try {
+      cachedToken =
+        (typeof window !== "undefined" && window.localStorage
+          ? window.localStorage.getItem(TOKEN_STORAGE_KEY)
+          : "") || "";
+    } catch (err) {
+      console.warn("Unable to read Hugging Face token from storage", err);
+      cachedToken = "";
+    }
+    tokenLoaded = true;
+  }
+  return cachedToken || "";
+}
+
+function storeToken(token) {
+  tokenLoaded = true;
+  cachedToken = token || "";
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      if (cachedToken) {
+        window.localStorage.setItem(TOKEN_STORAGE_KEY, cachedToken);
+      } else {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+      }
+    } catch (err) {
+      console.warn("Unable to persist Hugging Face token", err);
+    }
+  }
+  applyTokenToEnv();
+}
+
+function applyTokenToEnv() {
+  if (!transformersEnv) return;
+  const token = readStoredToken();
+  if (token) {
+    transformersEnv.HF_ACCESS_TOKEN = token;
+  } else {
+    delete transformersEnv.HF_ACCESS_TOKEN;
+  }
+}
+
+function ensureFetchPatched() {
+  if (fetchPatched) return;
+  if (typeof window === "undefined" || typeof window.fetch !== "function") return;
+
+  const originalFetch = window.fetch.bind(window);
+
+  window.fetch = async (input, init = {}) => {
+    let url;
+    if (input instanceof Request) {
+      url = input.url;
+    } else {
+      url = input;
+    }
+
+    const isHuggingFaceRequest =
+      typeof url === "string" && url.includes("huggingface.co");
+
+    const token = readStoredToken();
+
+    if (!isHuggingFaceRequest || !token) {
+      return originalFetch(input, init);
+    }
+
+    if (input instanceof Request) {
+      const headers = new Headers(input.headers);
+      if (init.headers) {
+        const overrideHeaders = new Headers(init.headers);
+        overrideHeaders.forEach((value, key) => headers.set(key, value));
+      }
+      headers.set("Authorization", `Bearer ${token}`);
+      const request = new Request(input, {
+        ...init,
+        headers,
+        mode: init.mode ?? input.mode ?? "cors",
+        credentials: init.credentials ?? input.credentials ?? "omit",
+      });
+      return originalFetch(request);
+    }
+
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    const patchedInit = {
+      ...init,
+      headers,
+      mode: init.mode ?? "cors",
+      credentials: init.credentials ?? "omit",
+    };
+    return originalFetch(input, patchedInit);
+  };
+
+  fetchPatched = true;
+}
+
 const STYLE_ID = "geocam-depth-anything";
 const STYLES = `
   .geocam-depth-overlay {
@@ -51,7 +153,8 @@ const STYLES = `
   }
 
   .geocam-depth-panel select,
-  .geocam-depth-panel button {
+  .geocam-depth-panel button,
+  .geocam-depth-panel input {
     width: 100%;
     border-radius: 8px;
     border: 1px solid rgba(148, 163, 184, 0.35);
@@ -60,6 +163,10 @@ const STYLES = `
     font-size: 13px;
     padding: 8px 10px;
     cursor: pointer;
+  }
+
+  .geocam-depth-panel input {
+    cursor: text;
   }
 
   .geocam-depth-panel button[disabled] {
@@ -76,6 +183,11 @@ const STYLES = `
   .geocam-depth-status {
     font-size: 12px;
     color: #cbd5f5;
+  }
+
+  .geocam-depth-token-status {
+    font-size: 12px;
+    color: #94a3b8;
   }
 `;
 
@@ -94,6 +206,8 @@ export const depthAnythingPlugin = (options = {}) => {
     autoShow: options.autoShow ?? true,
   };
 
+  ensureFetchPatched();
+
   let viewer;
   let overlayCanvas;
   let overlayCtx;
@@ -103,6 +217,9 @@ export const depthAnythingPlugin = (options = {}) => {
   let downloadButton;
   let statusText;
   let modelSelect;
+  let tokenInput;
+  let tokenButton;
+  let tokenStatus;
   let resizeObserver;
   let unsubscribeUrls;
   let unsubscribeProgress = [];
@@ -119,6 +236,8 @@ export const depthAnythingPlugin = (options = {}) => {
   let handleToggleClick;
   let handleDownloadClick;
   let handleModelChange;
+  let handleTokenSave;
+  let handleTokenKeydown;
 
   injectStyle(STYLE_ID, STYLES);
 
@@ -135,6 +254,20 @@ export const depthAnythingPlugin = (options = {}) => {
 
   function setStatus(text) {
     if (statusText) statusText.textContent = text;
+  }
+
+  function refreshTokenUI(message) {
+    const token = readStoredToken();
+    if (tokenInput && token !== undefined) {
+      tokenInput.value = token;
+    }
+    if (tokenStatus) {
+      tokenStatus.textContent =
+        message ||
+        (token
+          ? "Token stored locally; Hugging Face requests include authorization."
+          : "Optional: add a Hugging Face token (hf_…) for gated models.");
+    }
   }
 
   function updateOverlayStateLabel() {
@@ -181,6 +314,8 @@ export const depthAnythingPlugin = (options = {}) => {
       setStatus("Loading model…");
       const mod = await import(/* @vite-ignore */ CDN_SRC);
       const { pipeline, env } = mod;
+      transformersEnv = env;
+      applyTokenToEnv();
       env.allowRemoteModels = true;
       env.backends.onnx.wasm.numThreads = 2;
       try {
@@ -398,10 +533,35 @@ export const depthAnythingPlugin = (options = {}) => {
       downloadButton.textContent = "Download Depth";
       downloadButton.disabled = true;
 
+      const tokenLabel = document.createElement("label");
+      tokenLabel.textContent = "Hugging Face token";
+      tokenLabel.style.fontSize = "12px";
+      tokenLabel.style.color = "#cbd5f5";
+
+      tokenInput = document.createElement("input");
+      tokenInput.type = "password";
+      tokenInput.placeholder = "hf_...";
+      tokenInput.autocomplete = "off";
+      tokenInput.spellcheck = false;
+      const tokenInputId = `geocam-depth-token-${Math.random().toString(36).slice(2)}`;
+      tokenInput.id = tokenInputId;
+      tokenLabel.htmlFor = tokenInputId;
+
+      tokenButton = document.createElement("button");
+      tokenButton.type = "button";
+      tokenButton.textContent = "Save Token";
+
+      tokenStatus = document.createElement("div");
+      tokenStatus.className = "geocam-depth-token-status";
+
       statusText = document.createElement("div");
       statusText.className = "geocam-depth-status";
       statusText.textContent = "Depth: Idle";
 
+      panel.appendChild(tokenLabel);
+      panel.appendChild(tokenInput);
+      panel.appendChild(tokenButton);
+      panel.appendChild(tokenStatus);
       panel.appendChild(modelSelect);
       panel.appendChild(toggleButton);
       panel.appendChild(downloadButton);
@@ -420,9 +580,29 @@ export const depthAnythingPlugin = (options = {}) => {
         }
       };
 
+      handleTokenSave = () => {
+        if (!tokenInput) return;
+        const nextToken = tokenInput.value.trim();
+        storeToken(nextToken);
+        refreshTokenUI(
+          nextToken
+            ? "Token saved. Authorization will be sent to huggingface.co."
+            : "Token cleared. Public models only."
+        );
+      };
+
+      handleTokenKeydown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          handleTokenSave();
+        }
+      };
+
       toggleButton.addEventListener("click", handleToggleClick);
       downloadButton.addEventListener("click", handleDownloadClick);
       modelSelect.addEventListener("change", handleModelChange);
+      tokenButton.addEventListener("click", handleTokenSave);
+      tokenInput.addEventListener("keydown", handleTokenKeydown);
 
       window.addEventListener("keydown", handleKeydown);
 
@@ -439,6 +619,8 @@ export const depthAnythingPlugin = (options = {}) => {
       if (existingUrls && existingUrls.length) {
         handleUrls(existingUrls);
       }
+
+      refreshTokenUI();
     },
     destroy() {
       if (resizeObserver) {
@@ -452,9 +634,15 @@ export const depthAnythingPlugin = (options = {}) => {
         downloadButton.removeEventListener("click", handleDownloadClick);
       if (modelSelect && handleModelChange)
         modelSelect.removeEventListener("change", handleModelChange);
+      if (tokenButton && handleTokenSave)
+        tokenButton.removeEventListener("click", handleTokenSave);
+      if (tokenInput && handleTokenKeydown)
+        tokenInput.removeEventListener("keydown", handleTokenKeydown);
       handleToggleClick = null;
       handleDownloadClick = null;
       handleModelChange = null;
+      handleTokenSave = null;
+      handleTokenKeydown = null;
       unsubscribeProgress.forEach((unsub) => unsub && unsub());
       unsubscribeProgress = [];
       if (unsubscribeUrls) unsubscribeUrls();
