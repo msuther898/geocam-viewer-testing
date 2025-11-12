@@ -2,13 +2,14 @@ import { injectStyle } from "./utilities.js";
 
 const TOKEN_STORAGE_KEY = "geocam-depth-anything-hf-token";
 const HF_VALIDATE_URL = "https://huggingface.co/api/whoami-v2";
-let cachedToken;
+const CDN_SRC = "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.0";
+const TOKEN_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230f172a' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8.5' cy='12' r='4.5'/%3E%3Cpath d='M12.5 12h7l-2 2'/%3E%3Cpath d='M17.5 14l2 2'/%3E%3C/svg%3E";
+const DEPTH_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230f172a' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4l7 4v8l-7 4-7-4V8z'/%3E%3Cpath d='M5 8l7 4 7-4'/%3E%3Cpath d='M12 12v8'/%3E%3C/svg%3E";
+
+let cachedToken = "";
 let tokenLoaded = false;
 let fetchPatched = false;
 let transformersEnv = null;
-let tokenValid = false;
-let validatingToken = false;
-let tokenStatusMessage = "";
 
 function readStoredToken() {
   if (!tokenLoaded) {
@@ -77,8 +78,8 @@ function ensureFetchPatched() {
     const token = readStoredToken();
 
     const request = new Request(input, init);
-
     const headers = new Headers(request.headers);
+
     if (init.headers) {
       const overrideHeaders = new Headers(init.headers);
       overrideHeaders.forEach((value, key) => headers.set(key, value));
@@ -98,7 +99,6 @@ function ensureFetchPatched() {
     });
 
     const response = await originalFetch(finalRequest);
-
     const contentType = response.headers.get("content-type") || "";
 
     if (!response.ok || /text\/html/i.test(contentType)) {
@@ -239,71 +239,47 @@ const STYLES = `
     max-width: 220px;
   }
 
-  .geocam-depth-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 180px;
-    background: rgba(15, 18, 26, 0.85);
-    border-radius: 12px;
-    padding: 12px;
-    color: #e2e8f0;
-    border: 1px solid rgba(148, 163, 184, 0.45);
-    backdrop-filter: blur(4px);
-  }
-
-  .geocam-depth-panel select,
-  .geocam-depth-panel button,
-  .geocam-depth-panel input {
-    width: 100%;
+  .geocam-depth-status-badge {
+    position: absolute;
+    left: 16px;
+    bottom: 16px;
+    padding: 6px 10px;
     border-radius: 8px;
-    border: 1px solid rgba(148, 163, 184, 0.35);
-    background: rgba(15, 23, 42, 0.7);
-    color: #f8fafc;
-    font-size: 13px;
-    padding: 8px 10px;
-    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.4;
+    background: rgba(10, 12, 16, 0.75);
+    color: #f1f5f9;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    max-width: 240px;
   }
 
-  .geocam-depth-panel input {
-    cursor: text;
+  .geocam-depth-control-button {
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.55);
+    border-radius: 8px;
+    width: 36px;
+    height: 36px;
+    background-size: 22px 22px;
+    background-repeat: no-repeat;
+    background-position: center;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
   }
 
-  .geocam-depth-panel button[disabled] {
-    opacity: 0.6;
+  .geocam-depth-control-button:not(:disabled):hover {
+    background-color: rgba(255, 255, 255, 1);
+    border-color: rgba(148, 163, 184, 0.8);
+  }
+
+  .geocam-depth-control-button:disabled {
+    opacity: 0.55;
     cursor: not-allowed;
-  }
-
-  .geocam-depth-panel select:focus,
-  .geocam-depth-panel button:focus {
-    outline: 2px solid rgba(59, 130, 246, 0.7);
-    outline-offset: 2px;
-  }
-
-  .geocam-depth-status {
-    font-size: 12px;
-    color: #cbd5f5;
-  }
-
-  .geocam-depth-token-status {
-    font-size: 12px;
-    color: #94a3b8;
   }
 `;
 
-const MODELS = [
-  { id: "Xenova/depth-anything-v2-small", label: "Depth Anything v2 • Small" },
-  { id: "Xenova/depth-anything-v2-base", label: "Depth Anything v2 • Base" },
-  { id: "Xenova/depth-anything-v2-large", label: "Depth Anything v2 • Large" },
-];
-
-const CDN_SRC = "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.0";
-
 export const depthAnythingPlugin = (options = {}) => {
   const config = {
-    defaultModel: options.model ?? MODELS[0].id,
+    defaultModel: options.model ?? "Xenova/depth-anything-v2-small",
     opacity: options.opacity ?? 0.85,
-    autoShow: options.autoShow ?? true,
   };
 
   ensureFetchPatched();
@@ -312,32 +288,22 @@ export const depthAnythingPlugin = (options = {}) => {
   let overlayCanvas;
   let overlayCtx;
   let overlayInfo;
-  let panel;
-  let toggleButton;
-  let downloadButton;
-  let statusText;
-  let modelSelect;
-  let tokenInput;
+  let statusBadge;
   let tokenButton;
-  let tokenStatus;
+  let depthButton;
+  let handleDepthClick;
   let resizeObserver;
   let unsubscribeUrls;
   let unsubscribeProgress = [];
   let estimatorPromise = null;
   let estimatorModel = config.defaultModel;
-  let overlayVisible = false;
-  let depthReady = false;
-  let userPreference = null;
-  let depthPNG = null;
-  let pendingDepth = false;
-  let pendingMeshes = new Set();
+  let tokenValid = false;
+  let validatingToken = false;
+  let imageryReady = false;
   let running = false;
   let runId = 0;
-  let handleToggleClick;
-  let handleDownloadClick;
-  let handleModelChange;
-  let handleTokenSave;
-  let handleTokenKeydown;
+  let depthVisible = false;
+  let pendingMeshes = new Set();
 
   injectStyle(STYLE_ID, STYLES);
 
@@ -353,86 +319,74 @@ export const depthAnythingPlugin = (options = {}) => {
   }
 
   function setStatus(text) {
-    if (statusText) statusText.textContent = text;
+    if (statusBadge) {
+      statusBadge.textContent = text;
+    }
   }
 
-  function refreshTokenUI(message) {
-    if (typeof message === "string") {
-      tokenStatusMessage = message;
+  function setOverlayVisibility(visible) {
+    depthVisible = !!visible;
+    overlayCanvas.classList.toggle("geocam-depth-overlay-visible", depthVisible);
+    overlayCanvas.classList.toggle("geocam-depth-overlay-hidden", !depthVisible);
+    if (overlayInfo) {
+      overlayInfo.textContent = depthVisible
+        ? "Depth overlay: Visible"
+        : "Depth overlay: Hidden";
     }
+  }
 
-    const token = readStoredToken();
-    if (tokenInput && token !== undefined && !validatingToken) {
-      tokenInput.value = token;
-    }
-
-    if (tokenStatus) {
-      if (tokenStatusMessage) {
-        tokenStatus.textContent = tokenStatusMessage;
-      } else if (token) {
-        tokenStatus.textContent = tokenValid
-          ? "Token validated. Authorization headers are active."
-          : "Token saved. Validate it to begin loading depth models.";
+  function updateButtons() {
+    if (depthButton) {
+      const disabled = !tokenValid || !imageryReady || running;
+      depthButton.disabled = disabled;
+      depthButton.setAttribute("aria-disabled", disabled ? "true" : "false");
+      if (disabled) {
+        const reasons = [];
+        if (!tokenValid) reasons.push("save a Hugging Face token");
+        if (!imageryReady) reasons.push("wait for imagery");
+        if (running) reasons.push("wait for depth to finish");
+        depthButton.title = `Depth unavailable — ${reasons.join(" and ")}.`;
       } else {
-        tokenStatus.textContent =
-          "Enter a Hugging Face token (hf_…) to authorize model downloads.";
+        depthButton.title = "Run DepthAnything on the current view";
       }
     }
+  }
+
+  function dispatchTokenStatus(message, profile) {
+    const target = viewer?.element || viewer?.wrapper || null;
+    if (!target) return;
+    const detail = { valid: tokenValid, message };
+    if (profile) detail.profile = profile;
+    target.dispatchEvent(
+      new CustomEvent("depthanything:token-status", {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   function updateTokenValidity(valid, message, profile) {
     tokenValid = !!valid;
-    const displayMessage =
+    const detailMessage =
       message ||
       (tokenValid
         ? "Token validated. Authorization headers are active."
-        : "Token missing or invalid. Depth overlay is paused until validation succeeds.");
-    refreshTokenUI(displayMessage);
+        : "Token missing or invalid. Save a Hugging Face token to enable depth.");
 
     if (!tokenValid) {
-      depthReady = false;
-      depthPNG = null;
       setOverlayVisibility(false);
-      if (toggleButton) toggleButton.disabled = true;
-      if (downloadButton) downloadButton.disabled = true;
-      pendingDepth = true;
-      setStatus("Depth waiting for a validated Hugging Face token…");
-    } else if (!depthReady) {
-      setStatus("Token validated. Waiting for imagery…");
     }
 
-    const target = viewer?.element || viewer?.wrapper || null;
-    if (target) {
-      const detail = { valid: tokenValid, message: displayMessage };
-      if (profile) detail.profile = profile;
-      target.dispatchEvent(
-        new CustomEvent("depthanything:token-status", {
-          detail,
-          bubbles: true,
-          composed: true,
-        })
-      );
-    }
-
-    if (tokenValid && viewer?.progress?.length) {
-      const allReady = viewer.progress.every((store) => {
-        try {
-          return typeof store === "function" ? store() >= 1 : true;
-        } catch (err) {
-          return false;
-        }
-      });
-      if (allReady && !depthReady) {
-        void runDepth(true);
-      }
-    }
+    dispatchTokenStatus(detailMessage, profile);
+    updateButtons();
+    return detailMessage;
   }
 
-  async function validateAndActivateToken(token, { showStatus = true } = {}) {
+  async function validateAndActivateToken(token, { silent = false } = {}) {
     if (!token) {
       throw new Error("Missing Hugging Face token");
     }
-
     if (validatingToken) {
       throw new Error("Token validation already in progress");
     }
@@ -440,9 +394,8 @@ export const depthAnythingPlugin = (options = {}) => {
     validatingToken = true;
 
     try {
-      if (showStatus) {
+      if (!silent) {
         setStatus("Validating Hugging Face token…");
-        refreshTokenUI("Validating token…");
       }
 
       const profile = await validateToken(token);
@@ -452,66 +405,61 @@ export const depthAnythingPlugin = (options = {}) => {
         : "Token validated. Authorization headers are active.";
 
       storeToken(token);
-      updateTokenValidity(true, message, profile);
+      const detailMessage = updateTokenValidity(true, message, profile);
 
-      if (showStatus) {
-        setStatus("Token validated. Depth overlay will start after imagery loads.");
+      if (!silent) {
+        if (imageryReady) {
+          setStatus("Imagery ready. Click the depth icon to run.");
+        } else {
+          setStatus(detailMessage);
+        }
       }
 
-      return { profile, message };
+      return { profile, message: detailMessage };
     } catch (error) {
-      if (showStatus) {
-        const errMessage = error?.message || "Token validation failed.";
-        setStatus(`Token error: ${errMessage}`);
-        refreshTokenUI(`Token validation failed: ${errMessage}`);
+      if (!silent) {
+        setStatus(`Token validation failed: ${error?.message || error}`);
       }
       throw error;
     } finally {
       validatingToken = false;
+      updateButtons();
     }
   }
 
-  function updateOverlayStateLabel() {
-    const state = depthReady ? (overlayVisible ? "Visible" : "Hidden") : "Not ready";
-    if (overlayInfo) overlayInfo.innerHTML = `Depth overlay: <strong>${state}</strong>`;
-  }
-
-  function setOverlayVisibility(visible) {
-    overlayVisible = !!visible && depthReady;
-    overlayCanvas.classList.toggle("geocam-depth-overlay-visible", overlayVisible);
-    overlayCanvas.classList.toggle("geocam-depth-overlay-hidden", !overlayVisible);
-    if (toggleButton) {
-      toggleButton.textContent = overlayVisible ? "Hide Depth (D)" : "Show Depth (D)";
+  function promptForToken() {
+    if (typeof window === "undefined" || typeof window.prompt !== "function") {
+      console.warn("Prompt unavailable in this environment");
+      return;
     }
-    updateOverlayStateLabel();
-  }
 
-  function resetDepthState(message, expectedCount) {
-    depthReady = false;
-    depthPNG = null;
-    overlayCanvas.classList.add("geocam-depth-overlay-hidden");
-    overlayCanvas.classList.remove("geocam-depth-overlay-visible");
-    if (toggleButton) {
-      toggleButton.disabled = true;
-      toggleButton.textContent = "Show Depth (D)";
-    }
-    if (downloadButton) downloadButton.disabled = true;
-    userPreference = null;
-    pendingDepth = true;
-    const total = viewer.progress.length;
-    const count = Math.min(
-      typeof expectedCount === "number" ? expectedCount : total,
-      total
+    const existing = readStoredToken();
+    const input = window.prompt(
+      "Enter your Hugging Face access token (starts with hf_)",
+      existing || ""
     );
-    pendingMeshes = new Set(Array.from({ length: count }, (_, index) => index));
-    const statusMessage =
-      message ||
-      (tokenValid
-        ? "Waiting for imagery…"
-        : "Waiting for a validated Hugging Face token…");
-    setStatus(statusMessage);
-    updateOverlayStateLabel();
-    overlayVisible = false;
+
+    if (input === null) {
+      return;
+    }
+
+    const trimmed = input.trim();
+    estimatorPromise = null;
+
+    if (!trimmed) {
+      storeToken("");
+      const message = updateTokenValidity(
+        false,
+        "Token cleared. Save a Hugging Face token to enable depth."
+      );
+      setStatus(message);
+      return;
+    }
+
+    validateAndActivateToken(trimmed).catch((error) => {
+      const message = error?.message || "Token validation failed.";
+      setStatus(message);
+    });
   }
 
   async function loadEstimator(modelId) {
@@ -521,7 +469,7 @@ export const depthAnythingPlugin = (options = {}) => {
 
     estimatorModel = modelId;
     estimatorPromise = (async () => {
-      setStatus("Loading model…");
+      setStatus("Loading depth model…");
       const mod = await import(/* @vite-ignore */ CDN_SRC);
       const { pipeline, env } = mod;
       transformersEnv = env;
@@ -530,13 +478,13 @@ export const depthAnythingPlugin = (options = {}) => {
       env.backends.onnx.wasm.numThreads = 2;
       try {
         const estimator = await pipeline("depth-estimation", modelId, { device: "webgpu" });
-        setStatus("Model ready (WebGPU)");
+        setStatus("Depth model ready (WebGPU)");
         return estimator;
       } catch (err) {
         console.warn("DepthAnything WebGPU unavailable, falling back to WASM", err);
         setStatus("Falling back to WASM…");
         const estimator = await pipeline("depth-estimation", modelId);
-        setStatus("Model ready (WASM)");
+        setStatus("Depth model ready (WASM)");
         return estimator;
       }
     })().catch((err) => {
@@ -592,28 +540,33 @@ export const depthAnythingPlugin = (options = {}) => {
     overlayCtx.drawImage(tempCanvas, 0, 0, overlayCanvas.width, overlayCanvas.height);
     overlayCtx.restore();
     tempCanvas.remove();
-    depthPNG = overlayCanvas.toDataURL("image/png");
   }
 
-  async function runDepth(force = false) {
+  async function runDepth() {
     if (!viewer || !viewer.renderer) return;
     if (!tokenValid) {
-      pendingDepth = true;
-      setStatus("Waiting for a validated Hugging Face token…");
+      setStatus("Save a Hugging Face token to enable depth.");
       return;
     }
-    if (running && !force) {
+    if (!imageryReady) {
+      setStatus("Waiting for imagery to finish loading…");
       return;
     }
-    const currentRun = ++runId;
+    if (running) {
+      return;
+    }
+
     running = true;
-    setStatus("Estimating depth…");
+    updateButtons();
+    const currentRun = ++runId;
 
     try {
-      const estimator = await loadEstimator(modelSelect.value);
+      const estimator = await loadEstimator(estimatorModel);
       if (currentRun !== runId) {
         return;
       }
+
+      setStatus("Capturing current frame…");
       const captureUrl = viewer.renderer.domElement.toDataURL("image/png");
       const baseImage = await new Promise((resolve, reject) => {
         const img = new Image();
@@ -622,106 +575,134 @@ export const depthAnythingPlugin = (options = {}) => {
         img.crossOrigin = "anonymous";
         img.src = captureUrl;
       });
+
       if (currentRun !== runId) {
         return;
       }
+
+      setStatus("Estimating depth…");
       const result = await estimator(baseImage, {
         progress_callback: (p) => {
+          if (currentRun !== runId) return;
           if (p?.progress) {
             setStatus(`Estimating depth… ${(p.progress * 100).toFixed(0)}%`);
           }
         },
       });
+
       if (currentRun !== runId) {
         return;
       }
+
       const depth = result?.depth ?? result;
       renderDepthToCanvas(depth);
-      depthReady = true;
-      toggleButton.disabled = false;
-      downloadButton.disabled = !depthPNG;
-      setStatus("Depth ready");
-      const desired = userPreference ?? config.autoShow;
-      setOverlayVisibility(desired);
+      setOverlayVisibility(true);
+      setStatus("Depth ready. Click the depth icon to re-run.");
     } catch (err) {
       console.error("DepthAnything failed", err);
-      const message = err?.message || err;
+      const message = err?.message || String(err);
+      setOverlayVisibility(false);
       setStatus(`Depth error: ${message}`);
-      depthReady = false;
-      toggleButton.disabled = true;
-      downloadButton.disabled = true;
-      if (
-        err &&
-        typeof message === "string" &&
-        (/unauthorized/i.test(message) ||
-          /token/i.test(message) ||
-          /hugging face/i.test(message))
-      ) {
-        refreshTokenUI(
-          "Model download was rejected. Save an hf_ token to authorize Hugging Face requests."
+      if (/token|hugging face|unauthorized/i.test(message)) {
+        updateTokenValidity(
+          false,
+          `Hugging Face rejected the request: ${message}`
         );
       }
     } finally {
       if (currentRun === runId) {
         running = false;
-        pendingDepth = false;
+        updateButtons();
       }
+    }
+  }
+
+  function resetDepthState(message, expectedCount) {
+    setOverlayVisibility(false);
+    imageryReady = false;
+    pendingMeshes = new Set(
+      Array.from(
+        { length: typeof expectedCount === "number" ? expectedCount : viewer.progress.length },
+        (_, index) => index
+      )
+    );
+    setStatus(
+      message ||
+        (tokenValid
+          ? "Loading imagery…"
+          : "Save a Hugging Face token to enable depth.")
+    );
+    updateButtons();
+  }
+
+  function handleUrls(urls) {
+    if (!urls || urls.length === 0) {
+      resetDepthState("No imagery loaded.", 0);
+      return;
+    }
+    resetDepthState(undefined, urls.length);
+    viewer.progress.forEach((store, index) => {
+      try {
+        if (store() >= 1) {
+          pendingMeshes.delete(index);
+        }
+      } catch (err) {
+        console.warn("Unable to read viewer progress", err);
+      }
+    });
+    if (pendingMeshes.size === 0) {
+      imageryReady = true;
+      setStatus(
+        tokenValid
+          ? "Imagery ready. Click the depth icon to run."
+          : "Save a Hugging Face token to enable depth."
+      );
+      updateButtons();
     }
   }
 
   function handleProgress(index, value) {
-    if (!pendingDepth) return;
     if (value >= 1 && pendingMeshes.has(index)) {
       pendingMeshes.delete(index);
       if (pendingMeshes.size === 0) {
-        pendingDepth = false;
-        void runDepth();
+        imageryReady = true;
+        setStatus(
+          tokenValid
+            ? "Imagery ready. Click the depth icon to run."
+            : "Save a Hugging Face token to enable depth."
+        );
+        updateButtons();
       }
     }
   }
 
-  function handleUrls(urls) {
-    if (!urls || urls.length === 0) return;
-    resetDepthState(undefined, urls.length);
-    viewer.progress.forEach((store, index) => {
-      if (store() >= 1) {
-        pendingMeshes.delete(index);
-      }
-    });
-    if (pendingMeshes.size === 0) {
-      pendingDepth = false;
-      void runDepth();
+  function refreshStoredToken() {
+    const storedToken = readStoredToken();
+    if (!storedToken) {
+      const message = updateTokenValidity(
+        false,
+        "Save a Hugging Face token to enable depth."
+      );
+      setStatus(message);
+      return;
     }
-  }
 
-  function toggleDepth(force) {
-    if (!depthReady) return;
-    const next = typeof force === "boolean" ? force : !overlayVisible;
-    userPreference = next;
-    setOverlayVisibility(next);
-  }
-
-  function downloadDepth() {
-    if (!depthPNG) return;
-    const a = document.createElement("a");
-    a.href = depthPNG;
-    a.download = "depth.png";
-    a.click();
-  }
-
-  function handleKeydown(event) {
-    const target = event.target;
-    const isFormField =
-      target &&
-      (target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        target.isContentEditable);
-    if (isFormField) return;
-    if (event.key === "d" || event.key === "D") {
-      event.preventDefault();
-      toggleDepth();
-    }
+    setStatus("Validating stored Hugging Face token…");
+    validateAndActivateToken(storedToken, { silent: true })
+      .then(({ message }) => {
+        if (imageryReady) {
+          setStatus("Imagery ready. Click the depth icon to run.");
+        } else {
+          setStatus(message);
+        }
+      })
+      .catch((error) => {
+        console.warn("Stored Hugging Face token validation failed", error);
+        storeToken("");
+        const detail = `Stored token validation failed: ${error?.message || error}`;
+        updateTokenValidity(false, detail);
+        setStatus(detail);
+      });
   }
 
   return {
@@ -733,141 +714,38 @@ export const depthAnythingPlugin = (options = {}) => {
       overlayCtx = overlayCanvas.getContext("2d");
       overlayInfo = document.createElement("div");
       overlayInfo.className = "geocam-depth-overlay-info";
-      overlayInfo.textContent = "Depth overlay: Not ready";
+      overlayInfo.textContent = "Depth overlay: Hidden";
+      statusBadge = document.createElement("div");
+      statusBadge.className = "geocam-depth-status-badge";
+      statusBadge.textContent = "Save a Hugging Face token to enable depth.";
+
       viewer.wrapper.appendChild(overlayCanvas);
       viewer.wrapper.appendChild(overlayInfo);
-      updateOverlayStateLabel();
-
-      panel = document.createElement("div");
-      panel.className = "geocam-depth-panel";
-
-      modelSelect = document.createElement("select");
-      MODELS.forEach((model) => {
-        const option = document.createElement("option");
-        option.value = model.id;
-        option.textContent = model.label;
-        modelSelect.appendChild(option);
-      });
-      modelSelect.value = estimatorModel;
-
-      toggleButton = document.createElement("button");
-      toggleButton.type = "button";
-      toggleButton.textContent = "Show Depth (D)";
-      toggleButton.disabled = true;
-
-      downloadButton = document.createElement("button");
-      downloadButton.type = "button";
-      downloadButton.textContent = "Download Depth";
-      downloadButton.disabled = true;
-
-      const tokenLabel = document.createElement("label");
-      tokenLabel.textContent = "Hugging Face token";
-      tokenLabel.style.fontSize = "12px";
-      tokenLabel.style.color = "#cbd5f5";
-
-      tokenInput = document.createElement("input");
-      tokenInput.type = "password";
-      tokenInput.placeholder = "hf_...";
-      tokenInput.autocomplete = "off";
-      tokenInput.spellcheck = false;
-      const tokenInputId = `geocam-depth-token-${Math.random().toString(36).slice(2)}`;
-      tokenInput.id = tokenInputId;
-      tokenLabel.htmlFor = tokenInputId;
+      viewer.wrapper.appendChild(statusBadge);
 
       tokenButton = document.createElement("button");
       tokenButton.type = "button";
-      tokenButton.textContent = "Save Token";
+      tokenButton.className = "geocam-viewer-control-button geocam-depth-control-button";
+      tokenButton.style.backgroundImage = `url(${TOKEN_ICON})`;
+      tokenButton.title = "Save a Hugging Face token";
+      tokenButton.setAttribute("aria-label", "Save Hugging Face token");
 
-      tokenStatus = document.createElement("div");
-      tokenStatus.className = "geocam-depth-token-status";
+      depthButton = document.createElement("button");
+      depthButton.type = "button";
+      depthButton.className = "geocam-viewer-control-button geocam-depth-control-button";
+      depthButton.style.backgroundImage = `url(${DEPTH_ICON})`;
+      depthButton.title = "Run DepthAnything on the current view";
+      depthButton.disabled = true;
+      depthButton.setAttribute("aria-disabled", "true");
 
-      statusText = document.createElement("div");
-      statusText.className = "geocam-depth-status";
-      statusText.textContent = "Depth: Idle";
+      viewer.addControl(tokenButton, "right-top");
+      viewer.addControl(depthButton, "right-top", { after: tokenButton });
 
-      panel.appendChild(tokenLabel);
-      panel.appendChild(tokenInput);
-      panel.appendChild(tokenButton);
-      panel.appendChild(tokenStatus);
-      panel.appendChild(modelSelect);
-      panel.appendChild(toggleButton);
-      panel.appendChild(downloadButton);
-      panel.appendChild(statusText);
-
-      viewer.addControl(panel, "right-top");
-
-      handleToggleClick = () => toggleDepth();
-      handleDownloadClick = () => downloadDepth();
-      handleModelChange = () => {
-        estimatorPromise = null;
-        estimatorModel = modelSelect.value;
-        setStatus("Model changed");
-        if (depthReady) {
-          void runDepth(true);
-        }
+      tokenButton.addEventListener("click", promptForToken);
+      handleDepthClick = () => {
+        void runDepth();
       };
-
-      handleTokenSave = async () => {
-        if (!tokenInput || !tokenButton) return;
-        const nextToken = tokenInput.value.trim();
-        const previousToken = readStoredToken();
-        const hadValidToken = tokenValid && !!previousToken;
-
-        estimatorPromise = null;
-
-        if (!nextToken) {
-          storeToken("");
-          updateTokenValidity(
-            false,
-            "Token cleared. Depth overlay is paused until a token is validated."
-          );
-          setStatus("Token cleared. Waiting for a new Hugging Face token…");
-          return;
-        }
-
-        tokenButton.disabled = true;
-        tokenButton.textContent = "Validating…";
-
-        try {
-          await validateAndActivateToken(nextToken, { showStatus: true });
-          pendingDepth = true;
-          void runDepth(true);
-        } catch (error) {
-          const message = error?.message || "Token validation failed.";
-          console.error("Hugging Face token validation failed", error);
-          if (hadValidToken && previousToken) {
-            refreshTokenUI(
-              `Token validation failed: ${message}. Keeping existing token.`
-            );
-            if (tokenInput) tokenInput.value = nextToken;
-          } else {
-            storeToken("");
-            updateTokenValidity(
-              false,
-              `Token validation failed: ${message}`
-            );
-            if (tokenInput) tokenInput.value = nextToken;
-          }
-        } finally {
-          tokenButton.disabled = false;
-          tokenButton.textContent = "Save Token";
-        }
-      };
-
-      handleTokenKeydown = (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          handleTokenSave();
-        }
-      };
-
-      toggleButton.addEventListener("click", handleToggleClick);
-      downloadButton.addEventListener("click", handleDownloadClick);
-      modelSelect.addEventListener("change", handleModelChange);
-      tokenButton.addEventListener("click", handleTokenSave);
-      tokenInput.addEventListener("keydown", handleTokenKeydown);
-
-      window.addEventListener("keydown", handleKeydown);
+      depthButton.addEventListener("click", handleDepthClick);
 
       resizeObserver = new ResizeObserver(syncOverlaySize);
       resizeObserver.observe(viewer.renderer.domElement);
@@ -881,60 +759,32 @@ export const depthAnythingPlugin = (options = {}) => {
       const existingUrls = viewer.urls();
       if (existingUrls && existingUrls.length) {
         handleUrls(existingUrls);
+      } else {
+        setStatus("Save a Hugging Face token to enable depth.");
       }
 
-      updateTokenValidity(
-        false,
-        "Waiting for a validated Hugging Face token…"
-      );
-
-      const storedToken = readStoredToken();
-      if (storedToken) {
-        tokenButton.disabled = true;
-        validateAndActivateToken(storedToken, { showStatus: false })
-          .catch((error) => {
-            console.warn("Stored Hugging Face token validation failed", error);
-            storeToken("");
-            updateTokenValidity(
-              false,
-              `Stored token validation failed: ${
-                error?.message || error || "Unknown error"
-              }`
-            );
-          })
-          .finally(() => {
-            tokenButton.disabled = false;
-          });
-      }
+      refreshStoredToken();
     },
     destroy() {
       if (resizeObserver) {
         resizeObserver.disconnect();
         resizeObserver = null;
       }
-      window.removeEventListener("keydown", handleKeydown);
-      if (toggleButton && handleToggleClick)
-        toggleButton.removeEventListener("click", handleToggleClick);
-      if (downloadButton && handleDownloadClick)
-        downloadButton.removeEventListener("click", handleDownloadClick);
-      if (modelSelect && handleModelChange)
-        modelSelect.removeEventListener("change", handleModelChange);
-      if (tokenButton && handleTokenSave)
-        tokenButton.removeEventListener("click", handleTokenSave);
-      if (tokenInput && handleTokenKeydown)
-        tokenInput.removeEventListener("keydown", handleTokenKeydown);
-      handleToggleClick = null;
-      handleDownloadClick = null;
-      handleModelChange = null;
-      handleTokenSave = null;
-      handleTokenKeydown = null;
+      if (tokenButton) {
+        tokenButton.removeEventListener("click", promptForToken);
+      }
+      if (depthButton && handleDepthClick) {
+        depthButton.removeEventListener("click", handleDepthClick);
+      }
       unsubscribeProgress.forEach((unsub) => unsub && unsub());
       unsubscribeProgress = [];
       if (unsubscribeUrls) unsubscribeUrls();
       unsubscribeUrls = null;
       if (overlayCanvas?.parentNode) overlayCanvas.parentNode.removeChild(overlayCanvas);
       if (overlayInfo?.parentNode) overlayInfo.parentNode.removeChild(overlayInfo);
-      if (panel?.parentNode) panel.parentNode.removeChild(panel);
+      if (statusBadge?.parentNode) statusBadge.parentNode.removeChild(statusBadge);
+      handleDepthClick = null;
+      viewer = null;
     },
   };
 };
