@@ -1,4 +1,5 @@
 import { viewer as geocamViewer } from "./lib/viewer.js";
+import { depthAnythingPlugin } from "./lib/depth-anything-plugin.js";
 
 export class GeocamViewer extends HTMLElement {
   static get observedAttributes() {
@@ -49,9 +50,7 @@ export class GeocamViewer extends HTMLElement {
     const node = this;
     this.style.display = "block";
     this.viewer = new geocamViewer(node, {
-      plugins: [
-        // Plugins go here
-      ],
+      plugins: [depthAnythingPlugin()],
     });
 
     // this.updateViewer();
