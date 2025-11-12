@@ -1,10 +1,14 @@
 import { injectStyle } from "./utilities.js";
 
 const TOKEN_STORAGE_KEY = "geocam-depth-anything-hf-token";
+const HF_VALIDATE_URL = "https://huggingface.co/api/whoami-v2";
 let cachedToken;
 let tokenLoaded = false;
 let fetchPatched = false;
 let transformersEnv = null;
+let tokenValid = false;
+let validatingToken = false;
+let tokenStatusMessage = "";
 
 function readStoredToken() {
   if (!tokenLoaded) {
@@ -123,6 +127,79 @@ function ensureFetchPatched() {
   };
 
   fetchPatched = true;
+}
+
+function formatProfileName(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const candidates = [
+    profile.name,
+    profile.displayName,
+    profile.fullname,
+    profile.username,
+    profile.handle,
+    profile.email,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  if (Array.isArray(profile.orgs)) {
+    const org = profile.orgs.find((entry) => entry && typeof entry.name === "string");
+    if (org) return org.name.trim();
+  }
+  return "";
+}
+
+async function validateToken(token) {
+  if (!token) {
+    throw new Error("Missing Hugging Face token");
+  }
+
+  let response;
+  try {
+    response = await fetch(HF_VALIDATE_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      credentials: "omit",
+    });
+  } catch (err) {
+    throw new Error("Unable to reach Hugging Face for token validation");
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = await response.clone().text();
+    } catch (err) {
+      detail = "";
+    }
+
+    let message = `Token validation failed (${response.status})`;
+    if (response.status === 401 || response.status === 403) {
+      message = "Token rejected by Hugging Face";
+    } else if (detail) {
+      try {
+        const data = JSON.parse(detail);
+        const errorMessage = data?.error || data?.message;
+        if (errorMessage) message = errorMessage;
+      } catch (err) {
+        const trimmed = detail.trim();
+        if (trimmed) message = trimmed.slice(0, 200);
+      }
+    }
+
+    throw new Error(message);
+  }
+
+  try {
+    return await response.json();
+  } catch (err) {
+    return {};
+  }
 }
 
 const STYLE_ID = "geocam-depth-anything";
@@ -280,16 +357,117 @@ export const depthAnythingPlugin = (options = {}) => {
   }
 
   function refreshTokenUI(message) {
+    if (typeof message === "string") {
+      tokenStatusMessage = message;
+    }
+
     const token = readStoredToken();
-    if (tokenInput && token !== undefined) {
+    if (tokenInput && token !== undefined && !validatingToken) {
       tokenInput.value = token;
     }
+
     if (tokenStatus) {
-      tokenStatus.textContent =
-        message ||
-        (token
-          ? "Token stored locally; Hugging Face requests include authorization."
-          : "Optional: add a Hugging Face token (hf_…) for gated models.");
+      if (tokenStatusMessage) {
+        tokenStatus.textContent = tokenStatusMessage;
+      } else if (token) {
+        tokenStatus.textContent = tokenValid
+          ? "Token validated. Authorization headers are active."
+          : "Token saved. Validate it to begin loading depth models.";
+      } else {
+        tokenStatus.textContent =
+          "Enter a Hugging Face token (hf_…) to authorize model downloads.";
+      }
+    }
+  }
+
+  function updateTokenValidity(valid, message, profile) {
+    tokenValid = !!valid;
+    const displayMessage =
+      message ||
+      (tokenValid
+        ? "Token validated. Authorization headers are active."
+        : "Token missing or invalid. Depth overlay is paused until validation succeeds.");
+    refreshTokenUI(displayMessage);
+
+    if (!tokenValid) {
+      depthReady = false;
+      depthPNG = null;
+      setOverlayVisibility(false);
+      if (toggleButton) toggleButton.disabled = true;
+      if (downloadButton) downloadButton.disabled = true;
+      pendingDepth = true;
+      setStatus("Depth waiting for a validated Hugging Face token…");
+    } else if (!depthReady) {
+      setStatus("Token validated. Waiting for imagery…");
+    }
+
+    const target = viewer?.element || viewer?.wrapper || null;
+    if (target) {
+      const detail = { valid: tokenValid, message: displayMessage };
+      if (profile) detail.profile = profile;
+      target.dispatchEvent(
+        new CustomEvent("depthanything:token-status", {
+          detail,
+          bubbles: true,
+          composed: true,
+        })
+      );
+    }
+
+    if (tokenValid && viewer?.progress?.length) {
+      const allReady = viewer.progress.every((store) => {
+        try {
+          return typeof store === "function" ? store() >= 1 : true;
+        } catch (err) {
+          return false;
+        }
+      });
+      if (allReady && !depthReady) {
+        void runDepth(true);
+      }
+    }
+  }
+
+  async function validateAndActivateToken(token, { showStatus = true } = {}) {
+    if (!token) {
+      throw new Error("Missing Hugging Face token");
+    }
+
+    if (validatingToken) {
+      throw new Error("Token validation already in progress");
+    }
+
+    validatingToken = true;
+
+    try {
+      if (showStatus) {
+        setStatus("Validating Hugging Face token…");
+        refreshTokenUI("Validating token…");
+      }
+
+      const profile = await validateToken(token);
+      const alias = formatProfileName(profile);
+      const message = alias
+        ? `Token validated for ${alias}. Authorization headers are active.`
+        : "Token validated. Authorization headers are active.";
+
+      storeToken(token);
+      updateTokenValidity(true, message, profile);
+
+      if (showStatus) {
+        setStatus("Token validated. Depth overlay will start after imagery loads.");
+      }
+
+      return { profile, message };
+    } catch (error) {
+      if (showStatus) {
+        const errMessage = error?.message || "Token validation failed.";
+        setStatus(`Token error: ${errMessage}`);
+        refreshTokenUI(`Token validation failed: ${errMessage}`);
+      }
+      throw error;
+    } finally {
+      validatingToken = false;
     }
   }
 
@@ -302,18 +480,22 @@ export const depthAnythingPlugin = (options = {}) => {
     overlayVisible = !!visible && depthReady;
     overlayCanvas.classList.toggle("geocam-depth-overlay-visible", overlayVisible);
     overlayCanvas.classList.toggle("geocam-depth-overlay-hidden", !overlayVisible);
-    toggleButton.textContent = overlayVisible ? "Hide Depth (D)" : "Show Depth (D)";
+    if (toggleButton) {
+      toggleButton.textContent = overlayVisible ? "Hide Depth (D)" : "Show Depth (D)";
+    }
     updateOverlayStateLabel();
   }
 
-  function resetDepthState(message = "Waiting for imagery…", expectedCount) {
+  function resetDepthState(message, expectedCount) {
     depthReady = false;
     depthPNG = null;
     overlayCanvas.classList.add("geocam-depth-overlay-hidden");
     overlayCanvas.classList.remove("geocam-depth-overlay-visible");
-    toggleButton.disabled = true;
-    downloadButton.disabled = true;
-    if (toggleButton) toggleButton.textContent = "Show Depth (D)";
+    if (toggleButton) {
+      toggleButton.disabled = true;
+      toggleButton.textContent = "Show Depth (D)";
+    }
+    if (downloadButton) downloadButton.disabled = true;
     userPreference = null;
     pendingDepth = true;
     const total = viewer.progress.length;
@@ -322,7 +504,12 @@ export const depthAnythingPlugin = (options = {}) => {
       total
     );
     pendingMeshes = new Set(Array.from({ length: count }, (_, index) => index));
-    setStatus(message);
+    const statusMessage =
+      message ||
+      (tokenValid
+        ? "Waiting for imagery…"
+        : "Waiting for a validated Hugging Face token…");
+    setStatus(statusMessage);
     updateOverlayStateLabel();
     overlayVisible = false;
   }
@@ -410,8 +597,13 @@ export const depthAnythingPlugin = (options = {}) => {
 
   async function runDepth(force = false) {
     if (!viewer || !viewer.renderer) return;
-    if (running) {
-      if (!force) return;
+    if (!tokenValid) {
+      pendingDepth = true;
+      setStatus("Waiting for a validated Hugging Face token…");
+      return;
+    }
+    if (running && !force) {
+      return;
     }
     const currentRun = ++runId;
     running = true;
@@ -490,7 +682,7 @@ export const depthAnythingPlugin = (options = {}) => {
 
   function handleUrls(urls) {
     if (!urls || urls.length === 0) return;
-    resetDepthState("Waiting for imagery…", urls.length);
+    resetDepthState(undefined, urls.length);
     viewer.progress.forEach((store, index) => {
       if (store() >= 1) {
         pendingMeshes.delete(index);
@@ -615,20 +807,50 @@ export const depthAnythingPlugin = (options = {}) => {
         }
       };
 
-      handleTokenSave = () => {
-        if (!tokenInput) return;
+      handleTokenSave = async () => {
+        if (!tokenInput || !tokenButton) return;
         const nextToken = tokenInput.value.trim();
-        storeToken(nextToken);
+        const previousToken = readStoredToken();
+        const hadValidToken = tokenValid && !!previousToken;
+
         estimatorPromise = null;
-        if (nextToken) {
-          refreshTokenUI(
-            "Token saved. Authorization will be sent to huggingface.co."
+
+        if (!nextToken) {
+          storeToken("");
+          updateTokenValidity(
+            false,
+            "Token cleared. Depth overlay is paused until a token is validated."
           );
-          setStatus("Token saved. Reloading depth…");
+          setStatus("Token cleared. Waiting for a new Hugging Face token…");
+          return;
+        }
+
+        tokenButton.disabled = true;
+        tokenButton.textContent = "Validating…";
+
+        try {
+          await validateAndActivateToken(nextToken, { showStatus: true });
+          pendingDepth = true;
           void runDepth(true);
-        } else {
-          refreshTokenUI("Token cleared. Public models only.");
-          setStatus("Token cleared. Depth models may require authorization.");
+        } catch (error) {
+          const message = error?.message || "Token validation failed.";
+          console.error("Hugging Face token validation failed", error);
+          if (hadValidToken && previousToken) {
+            refreshTokenUI(
+              `Token validation failed: ${message}. Keeping existing token.`
+            );
+            if (tokenInput) tokenInput.value = nextToken;
+          } else {
+            storeToken("");
+            updateTokenValidity(
+              false,
+              `Token validation failed: ${message}`
+            );
+            if (tokenInput) tokenInput.value = nextToken;
+          }
+        } finally {
+          tokenButton.disabled = false;
+          tokenButton.textContent = "Save Token";
         }
       };
 
@@ -661,7 +883,29 @@ export const depthAnythingPlugin = (options = {}) => {
         handleUrls(existingUrls);
       }
 
-      refreshTokenUI();
+      updateTokenValidity(
+        false,
+        "Waiting for a validated Hugging Face token…"
+      );
+
+      const storedToken = readStoredToken();
+      if (storedToken) {
+        tokenButton.disabled = true;
+        validateAndActivateToken(storedToken, { showStatus: false })
+          .catch((error) => {
+            console.warn("Stored Hugging Face token validation failed", error);
+            storeToken("");
+            updateTokenValidity(
+              false,
+              `Stored token validation failed: ${
+                error?.message || error || "Unknown error"
+              }`
+            );
+          })
+          .finally(() => {
+            tokenButton.disabled = false;
+          });
+      }
     },
     destroy() {
       if (resizeObserver) {

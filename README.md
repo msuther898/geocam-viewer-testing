@@ -18,11 +18,16 @@ entry point together with the bundled viewer assets, so `/` serves the demo auto
 
 ### Hugging Face access tokens
 
-Depth estimation models are hosted on Hugging Face. When you open the demo page you will see a new
-token field in the depth overlay control panel. Paste an `hf_...` access token there and click
-**Save Token** – the value is stored in `localStorage`, applied to the Transformers.js environment,
-and automatically attached to every request targeting `huggingface.co`. Leave the field blank if you
-only need public models; you can clear the saved token at any time by saving an empty value.
+Depth estimation models are hosted on Hugging Face, and the demo will not stream imagery until a
+token has been validated. When the page loads the depth overlay shows a password field and
+**Save Token** button – paste an `hf_...` access token, click save, and wait for the panel to confirm
+validation before any panoramas appear. Tokens are stored in `localStorage`, applied to the
+Transformers.js environment, and automatically attached to every request targeting
+`huggingface.co`. Save an empty value to clear the stored token.
+
+Once the token is marked valid, use the navigation controls inside the viewer (or the ←/→ arrow
+keys) to drive through the sample sequence. Each frame triggers a fresh depth estimation run, and
+you can download the grayscale overlay whenever the status reads “Depth ready”.
 
 ### NPM Installation:
 ```
