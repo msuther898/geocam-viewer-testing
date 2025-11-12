@@ -66,37 +66,60 @@ function ensureFetchPatched() {
     const isHuggingFaceRequest =
       typeof url === "string" && url.includes("huggingface.co");
 
-    const token = readStoredToken();
-
-    if (!isHuggingFaceRequest || !token) {
+    if (!isHuggingFaceRequest) {
       return originalFetch(input, init);
     }
 
-    if (input instanceof Request) {
-      const headers = new Headers(input.headers);
-      if (init.headers) {
-        const overrideHeaders = new Headers(init.headers);
-        overrideHeaders.forEach((value, key) => headers.set(key, value));
-      }
-      headers.set("Authorization", `Bearer ${token}`);
-      const request = new Request(input, {
-        ...init,
-        headers,
-        mode: init.mode ?? input.mode ?? "cors",
-        credentials: init.credentials ?? input.credentials ?? "omit",
-      });
-      return originalFetch(request);
+    const token = readStoredToken();
+
+    const request = new Request(input, init);
+
+    const headers = new Headers(request.headers);
+    if (init.headers) {
+      const overrideHeaders = new Headers(init.headers);
+      overrideHeaders.forEach((value, key) => headers.set(key, value));
     }
 
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${token}`);
-    const patchedInit = {
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    } else {
+      headers.delete("Authorization");
+    }
+
+    const finalRequest = new Request(request, {
       ...init,
       headers,
-      mode: init.mode ?? "cors",
-      credentials: init.credentials ?? "omit",
-    };
-    return originalFetch(input, patchedInit);
+      mode: init.mode ?? request.mode ?? "cors",
+      credentials: init.credentials ?? request.credentials ?? "omit",
+    });
+
+    const response = await originalFetch(finalRequest);
+
+    const contentType = response.headers.get("content-type") || "";
+
+    if (!response.ok || /text\/html/i.test(contentType)) {
+      let detail = "";
+      try {
+        detail = (await response.clone().text()).slice(0, 200);
+      } catch (err) {
+        console.warn("Unable to read Hugging Face error response", err);
+      }
+
+      console.warn("Hugging Face request failed", response.status, detail);
+
+      let message = `Hugging Face request failed (${response.status})`;
+      if (response.status === 401 || response.status === 403) {
+        message =
+          "Hugging Face rejected the request. Save a valid hf_ access token and try again.";
+      } else if (/text\/html/i.test(contentType) || /^\s*</.test(detail)) {
+        message =
+          "Hugging Face returned an HTML error page instead of JSON. This usually means the request was unauthorized or redirected.";
+      }
+
+      throw new Error(message);
+    }
+
+    return response;
   };
 
   fetchPatched = true;
@@ -430,14 +453,17 @@ export const depthAnythingPlugin = (options = {}) => {
       setOverlayVisibility(desired);
     } catch (err) {
       console.error("DepthAnything failed", err);
-      setStatus(`Depth error: ${err?.message || err}`);
+      const message = err?.message || err;
+      setStatus(`Depth error: ${message}`);
       depthReady = false;
       toggleButton.disabled = true;
       downloadButton.disabled = true;
       if (
         err &&
-        typeof err.message === "string" &&
-        /unauthorized/i.test(err.message)
+        typeof message === "string" &&
+        (/unauthorized/i.test(message) ||
+          /token/i.test(message) ||
+          /hugging face/i.test(message))
       ) {
         refreshTokenUI(
           "Model download was rejected. Save an hf_ token to authorize Hugging Face requests."
