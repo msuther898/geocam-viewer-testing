@@ -1,6 +1,12 @@
 # Geocam Viewer
 Geocam shot viewer web component for displaying shots captured by a geocam rig.
 
+## Live demo / GitHub Pages
+
+The repository now ships with a ready-to-host `index.html` at the project root. Open the file
+directly after running `npm run build`, or deploy the repository to GitHub Pages / Vercel and visit
+`https://<your-domain>/index.html` to try the viewer together with the Depth Anything overlay.
+
 ### NPM Installation:
 ```
 npm install 'https://gitpkg.now.sh/geocamxyz/geocam-viewer/src?v2.0.3'

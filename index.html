@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Geocam Viewer + Depth Anything Demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: #0b0d11;
+        color: #f8fafc;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: radial-gradient(circle at top, rgba(59, 130, 246, 0.25), transparent 55%),
+          #0b0d11;
+      }
+
+      header {
+        padding: 1.75rem clamp(1.5rem, 4vw, 3rem) 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+        background: rgba(2, 6, 23, 0.65);
+        backdrop-filter: blur(10px);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+
+      h1 {
+        margin: 0;
+        font-weight: 600;
+        font-size: clamp(1.4rem, 2.4vw, 1.75rem);
+        letter-spacing: 0.02em;
+      }
+
+      p {
+        margin: 0;
+        color: #cbd5f5;
+        max-width: 60ch;
+        line-height: 1.6;
+      }
+
+      main {
+        flex: 1;
+        display: grid;
+        gap: 1.5rem;
+        padding: clamp(1.5rem, 4vw, 3rem);
+      }
+
+      .viewer-shell {
+        position: relative;
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        background: rgba(15, 23, 42, 0.45);
+        min-height: min(70vh, 720px);
+        overflow: hidden;
+        display: grid;
+        place-items: stretch;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+      }
+
+      geocam-viewer {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .tip {
+        font-size: 0.95rem;
+        color: #94a3b8;
+      }
+
+      code {
+        font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", ui-monospace, monospace;
+        background: rgba(15, 23, 42, 0.65);
+        padding: 0.15rem 0.4rem;
+        border-radius: 0.5rem;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      footer {
+        padding: 1.5rem clamp(1.5rem, 4vw, 3rem) 3rem;
+        color: #64748b;
+        font-size: 0.95rem;
+        border-top: 1px solid rgba(148, 163, 184, 0.25);
+        background: rgba(2, 6, 23, 0.65);
+        backdrop-filter: blur(10px);
+      }
+
+      a {
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Geocam Viewer DepthAnything Demo</h1>
+      <p>
+        This standalone page loads <code>dist/geocam-viewer.js</code>, instantiates the custom
+        <code>&lt;geocam-viewer&gt;</code> element, and automatically wires up the Depth Anything v2 overlay
+        plugin. Press <strong>D</strong> to toggle the depth canvas or use the control panel that appears in
+        the viewer.
+      </p>
+    </header>
+    <main>
+      <section class="viewer-shell">
+        <geocam-viewer id="viewer" fov="35" facing="0" horizon="0"></geocam-viewer>
+      </section>
+      <p class="tip">
+        Tip: Open the developer console to watch loading logs. Depth estimation starts after the three
+        hemispherical tiles finish loading, and you can download the computed grayscale depth map via the
+        built-in button.
+      </p>
+    </main>
+    <footer>
+      Works out of the box on GitHub Pages: drop this repository at the root of a static host and visit
+      <code>/index.html</code>. For local testing, run <code>npm install</code> followed by
+      <code>npm run build</code>, then open this file directly or serve it with
+      <code>npx http-server .</code>
+    </footer>
+
+    <script type="module">
+      import "./dist/geocam-viewer.js";
+
+      const SAMPLE_SHOT = {
+        images: [
+          "https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/0/0000/00002506.jpg?bytes=8431183872-8434173007&container=https%3A%2F%2Fs3proxy.geocam.xyz%2Fgc-raw-surveys-archive%2FNIST%2FBoiseDriving%2FBen_10-27%2Fgc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2_0.tar",
+          "https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/1/0000/00002506.jpg?bytes=8022497792-8025797203&container=https%3A%2F%2Fs3proxy.geocam.xyz%2Fgc-raw-surveys-archive%2FNIST%2FBoiseDriving%2FBen_10-27%2Fgc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2_1.tar",
+          "https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/2/0000/00002506.jpg?bytes=8256700416-8259564683&container=https%3A%2F%2Fs3proxy.geocam.xyz%2Fgc-raw-surveys-archive%2FNIST%2FBoiseDriving%2FBen_10-27%2Fgc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2_2.tar",
+        ],
+        meshes: [
+          "https://manager.geocam.xyz/calibration/717/hemisphere_0.obj",
+          "https://manager.geocam.xyz/calibration/717/hemisphere_1.obj",
+          "https://manager.geocam.xyz/calibration/717/hemisphere_2.obj",
+        ],
+      };
+
+      async function showSampleShot(element) {
+        await customElements.whenDefined("geocam-viewer");
+        // The component exposes an updateViewer helper that feeds in the sample scene used during development.
+        if (typeof element.updateViewer === "function") {
+          element.updateViewer();
+          return;
+        }
+
+        // Fallback: call the underlying viewer directly once it is available.
+        const waitForViewer = () =>
+          new Promise((resolve) => {
+            const check = () => {
+              if (element.viewer) {
+                resolve(element.viewer);
+              } else {
+                requestAnimationFrame(check);
+              }
+            };
+            check();
+          });
+
+        const viewer = await waitForViewer();
+        viewer.show(
+          SAMPLE_SHOT.images.map((url) => [url]),
+          0,
+          SAMPLE_SHOT.meshes
+        );
+      }
+
+      showSampleShot(document.getElementById("viewer"));
+    </script>
+  </body>
+</html>
