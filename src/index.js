@@ -1,4 +1,5 @@
 import { viewer as geocamViewer } from "./lib/viewer.js";
+import { depthPlugin } from "./lib/depth-plugin.js";
 
 export class GeocamViewer extends HTMLElement {
   static get observedAttributes() {
@@ -50,7 +51,7 @@ export class GeocamViewer extends HTMLElement {
     this.style.display = "block";
     this.viewer = new geocamViewer(node, {
       plugins: [
-        // Plugins go here
+        depthPlugin
       ],
     });
 

@@ -6,6 +6,10 @@
   "scripts": {
     "build": "vite build"
   },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.15.0",
+    "@tensorflow-models/depth-estimation": "^0.0.1"
+  },
   "devDependencies": {
     "vite": "^4.0.4"
   }
