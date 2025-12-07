@@ -1,4 +1,11 @@
 import { viewer as geocamViewer } from "./lib/viewer.js";
+import { DepthEstimator, DepthResult, getDepthEstimator } from "./lib/depth-estimator.js";
+import { PointTaggerPlugin } from "./lib/plugin-point-tagger.js";
+
+// Export modules for external use
+export { DepthEstimator, DepthResult, getDepthEstimator };
+export { PointTaggerPlugin };
+export { geocamViewer as viewer };
 
 export class GeocamViewer extends HTMLElement {
   static get observedAttributes() {

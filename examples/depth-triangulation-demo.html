@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Depth Triangulation Demo - Geocam Viewer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #fff;
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: 24px;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 350px;
+      gap: 20px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    .viewer-panel {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    #viewer-container {
+      width: 100%;
+      height: 600px;
+    }
+
+    .controls-panel {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .section {
+      margin-bottom: 20px;
+    }
+
+    .section h3 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      text-transform: uppercase;
+      color: #888;
+    }
+
+    .btn {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      width: 100%;
+      margin-bottom: 8px;
+    }
+
+    .btn:hover {
+      background: #45a049;
+    }
+
+    .btn:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+
+    .btn.secondary {
+      background: #2196F3;
+    }
+
+    .btn.secondary:hover {
+      background: #1976D2;
+    }
+
+    .btn.warning {
+      background: #ff9800;
+    }
+
+    .btn.danger {
+      background: #f44336;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-group .btn {
+      flex: 1;
+    }
+
+    .status {
+      background: #333;
+      padding: 10px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+
+    .status.loading {
+      color: #ff9800;
+    }
+
+    .status.ready {
+      color: #4CAF50;
+    }
+
+    .status.error {
+      color: #f44336;
+    }
+
+    .points-list {
+      max-height: 200px;
+      overflow-y: auto;
+      background: #333;
+      border-radius: 4px;
+    }
+
+    .point-item {
+      padding: 8px 12px;
+      border-bottom: 1px solid #444;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .point-item:last-child {
+      border-bottom: none;
+    }
+
+    .point-item .name {
+      font-weight: 500;
+    }
+
+    .point-item .coords {
+      font-size: 11px;
+      color: #888;
+    }
+
+    .point-item .actions button {
+      background: none;
+      border: none;
+      color: #f44336;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .triangulation-result {
+      background: #1a3a1a;
+      padding: 12px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .triangulation-result .coord {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+
+    .image-nav {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .image-nav button {
+      flex: 1;
+      background: #444;
+      border: none;
+      color: white;
+      padding: 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .image-nav button:hover {
+      background: #555;
+    }
+
+    .image-nav button.active {
+      background: #2196F3;
+    }
+
+    .depth-preview {
+      width: 100%;
+      height: 150px;
+      background: #333;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+      overflow: hidden;
+    }
+
+    .depth-preview canvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .input-group {
+      margin-bottom: 12px;
+    }
+
+    .input-group label {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #888;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #444;
+      border-radius: 4px;
+      background: #333;
+      color: white;
+    }
+
+    .instructions {
+      background: #333;
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .instructions ol {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .instructions li {
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Depth-Assisted Triangulation Demo</h1>
+
+  <div class="container">
+    <div class="viewer-panel">
+      <div id="viewer-container"></div>
+    </div>
+
+    <div class="controls-panel">
+      <div class="section">
+        <h3>Status</h3>
+        <div id="status" class="status">Initializing...</div>
+      </div>
+
+      <div class="section">
+        <h3>Instructions</h3>
+        <div class="instructions">
+          <ol>
+            <li><strong>Load Depth Model</strong> - Click to download and initialize the AI model</li>
+            <li><strong>Estimate Depth</strong> - Run depth estimation on current image</li>
+            <li><strong>Enable Tagging</strong> - Click on the image to place markers</li>
+            <li><strong>Navigate Images</strong> - Tag the same point in multiple images</li>
+            <li><strong>Triangulate</strong> - Compute 3D position from tagged points</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Depth Model</h3>
+        <button id="btn-load-model" class="btn">Load Depth Model</button>
+        <button id="btn-estimate-depth" class="btn secondary" disabled>Estimate Depth</button>
+        <div class="depth-preview" id="depth-preview">
+          No depth map yet
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Point Tagging</h3>
+        <div class="btn-group">
+          <button id="btn-toggle-tagging" class="btn warning" disabled>Enable Tagging</button>
+          <button id="btn-clear-points" class="btn danger" disabled>Clear All</button>
+        </div>
+        <div class="points-list" id="points-list">
+          <div class="point-item" style="color: #666;">No points tagged yet</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Image Navigation</h3>
+        <div class="image-nav">
+          <button data-image="0" class="active">Image 1</button>
+          <button data-image="1">Image 2</button>
+          <button data-image="2">Image 3</button>
+          <button data-image="3">Image 4</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Triangulation</h3>
+        <div class="input-group">
+          <label>Triangulation Set Name</label>
+          <input type="text" id="triangulation-set-name" placeholder="e.g., corner-of-building" value="target-point">
+        </div>
+        <button id="btn-add-to-set" class="btn secondary" disabled>Add Selected Point to Set</button>
+        <button id="btn-triangulate" class="btn" disabled>Triangulate</button>
+        <div class="triangulation-result" id="triangulation-result" style="display: none;">
+          <div class="coord"><span>X:</span> <span id="result-x">-</span></div>
+          <div class="coord"><span>Y:</span> <span id="result-y">-</span></div>
+          <div class="coord"><span>Z:</span> <span id="result-z">-</span></div>
+          <div class="coord"><span>Confidence:</span> <span id="result-confidence">-</span></div>
+          <div class="coord"><span>Views Used:</span> <span id="result-views">-</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { viewer, PointTaggerPlugin, DepthEstimator } from '../src/index.js';
+
+    // Sample image URLs (replace with your actual images)
+    const sampleImages = [
+      // Each entry is an array of 3 hemispheres
+      [
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/0/0000/00002506.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/1/0000/00002506.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/2/0000/00002506.jpg'],
+      ],
+      [
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/0/0000/00002507.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/1/0000/00002507.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/2/0000/00002507.jpg'],
+      ],
+      [
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/0/0000/00002508.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/1/0000/00002508.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/2/0000/00002508.jpg'],
+      ],
+      [
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/0/0000/00002509.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/1/0000/00002509.jpg'],
+        ['https://image.geocam.xyz/gc2-2022-10-28-5985_s-Boise_driving_v-Ben1027_n-2/2/0000/00002509.jpg'],
+      ],
+    ];
+
+    // Sample camera positions for triangulation (replace with actual GPS/IMU data)
+    const cameraPositions = [
+      [0, 0, 0],
+      [1, 0, 0],
+      [2, 0, 0],
+      [3, 0, 0],
+    ];
+
+    const hemisphereUrls = [
+      'https://manager.geocam.xyz/calibration/717/hemisphere_0.obj',
+      'https://manager.geocam.xyz/calibration/717/hemisphere_1.obj',
+      'https://manager.geocam.xyz/calibration/717/hemisphere_2.obj',
+    ];
+
+    // Initialize
+    const container = document.getElementById('viewer-container');
+    const statusEl = document.getElementById('status');
+    const pointTagger = PointTaggerPlugin({
+      onPointTagged: (point) => {
+        updatePointsList();
+        updateStatus(`Point tagged: ${point.name}`);
+      },
+      onDepthReady: (depthResult) => {
+        showDepthPreview(depthResult);
+      },
+      onTriangulated: (setName, result) => {
+        showTriangulationResult(result);
+      }
+    });
+
+    let currentImageIndex = 0;
+    let taggingEnabled = false;
+    let selectedPointId = null;
+
+    const v = new viewer(container, {
+      plugins: [pointTagger]
+    });
+
+    // Set up viewer
+    v.setup({
+      fov: 75,
+      aspect: container.clientWidth / container.clientHeight
+    });
+
+    // Load first image
+    loadImage(0);
+
+    function loadImage(index) {
+      currentImageIndex = index;
+      v.show(sampleImages[index], 0, hemisphereUrls);
+      updateImageNavButtons();
+      updateStatus(`Loaded image ${index + 1}`);
+    }
+
+    function updateStatus(message, type = '') {
+      statusEl.textContent = message;
+      statusEl.className = 'status ' + type;
+    }
+
+    function updatePointsList() {
+      const list = document.getElementById('points-list');
+      const points = pointTagger.getPoints();
+
+      if (points.length === 0) {
+        list.innerHTML = '<div class="point-item" style="color: #666;">No points tagged yet</div>';
+        return;
+      }
+
+      list.innerHTML = points.map(p => `
+        <div class="point-item" data-id="${p.id}">
+          <div>
+            <div class="name">${p.name}</div>
+            <div class="coords">Az: ${p.azimuth.toFixed(1)} El: ${p.elevation.toFixed(1)} D: ${p.depth?.toFixed(2) || 'N/A'}</div>
+          </div>
+          <div class="actions">
+            <button onclick="selectPoint('${p.id}')">Select</button>
+            <button onclick="removePoint('${p.id}')">X</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function showDepthPreview(depthResult) {
+      const preview = document.getElementById('depth-preview');
+      const canvas = depthResult.toCanvas();
+      canvas.style.maxWidth = '100%';
+      canvas.style.maxHeight = '100%';
+      preview.innerHTML = '';
+      preview.appendChild(canvas);
+    }
+
+    function showTriangulationResult(result) {
+      const resultEl = document.getElementById('triangulation-result');
+      if (!result) {
+        resultEl.style.display = 'none';
+        return;
+      }
+
+      resultEl.style.display = 'block';
+      document.getElementById('result-x').textContent = result.position[0].toFixed(4);
+      document.getElementById('result-y').textContent = result.position[1].toFixed(4);
+      document.getElementById('result-z').textContent = result.position[2].toFixed(4);
+      document.getElementById('result-confidence').textContent = (result.confidence * 100).toFixed(1) + '%';
+      document.getElementById('result-views').textContent = result.viewCount;
+    }
+
+    function updateImageNavButtons() {
+      document.querySelectorAll('.image-nav button').forEach((btn, i) => {
+        btn.classList.toggle('active', i === currentImageIndex);
+      });
+    }
+
+    // Make functions available globally for onclick handlers
+    window.selectPoint = (id) => {
+      selectedPointId = id;
+      pointTagger.selectPoint(id);
+      document.getElementById('btn-add-to-set').disabled = false;
+    };
+
+    window.removePoint = (id) => {
+      pointTagger.removePoint(id);
+      updatePointsList();
+    };
+
+    // Button handlers
+    document.getElementById('btn-load-model').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-load-model');
+      btn.disabled = true;
+      btn.textContent = 'Loading...';
+      updateStatus('Loading Depth Anything v2 model...', 'loading');
+
+      try {
+        const estimator = new DepthEstimator({
+          onProgress: (p) => {
+            if (p.progress) {
+              updateStatus(`Loading model: ${(p.progress * 100).toFixed(0)}%`, 'loading');
+            }
+          }
+        });
+        await estimator.initialize();
+
+        updateStatus('Model loaded successfully!', 'ready');
+        btn.textContent = 'Model Loaded';
+        document.getElementById('btn-estimate-depth').disabled = false;
+      } catch (error) {
+        updateStatus('Failed to load model: ' + error.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'Retry Load Model';
+      }
+    });
+
+    document.getElementById('btn-estimate-depth').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-estimate-depth');
+      btn.disabled = true;
+      btn.textContent = 'Estimating...';
+      updateStatus('Running depth estimation...', 'loading');
+
+      try {
+        await pointTagger.estimateDepth();
+        updateStatus('Depth estimation complete!', 'ready');
+        btn.textContent = 'Re-estimate Depth';
+        btn.disabled = false;
+        document.getElementById('btn-toggle-tagging').disabled = false;
+        document.getElementById('btn-clear-points').disabled = false;
+      } catch (error) {
+        updateStatus('Depth estimation failed: ' + error.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'Retry Estimate';
+      }
+    });
+
+    document.getElementById('btn-toggle-tagging').addEventListener('click', () => {
+      taggingEnabled = !taggingEnabled;
+      pointTagger.setTaggingMode(taggingEnabled);
+      const btn = document.getElementById('btn-toggle-tagging');
+      btn.textContent = taggingEnabled ? 'Disable Tagging' : 'Enable Tagging';
+      btn.classList.toggle('active', taggingEnabled);
+      updateStatus(taggingEnabled ? 'Click on image to tag points' : 'Tagging disabled');
+    });
+
+    document.getElementById('btn-clear-points').addEventListener('click', () => {
+      const points = pointTagger.getPoints();
+      points.forEach(p => pointTagger.removePoint(p.id));
+      updatePointsList();
+      updateStatus('All points cleared');
+    });
+
+    document.getElementById('btn-add-to-set').addEventListener('click', () => {
+      if (!selectedPointId) {
+        updateStatus('Select a point first', 'error');
+        return;
+      }
+
+      const setName = document.getElementById('triangulation-set-name').value || 'default';
+      const point = pointTagger.getPoint(selectedPointId);
+      const cameraPos = cameraPositions[currentImageIndex];
+
+      pointTagger.addToTriangulationSet(setName, point, cameraPos);
+
+      const set = pointTagger.getTriangulationSet(setName);
+      updateStatus(`Added to "${setName}" (${set.views.length} views)`);
+      document.getElementById('btn-triangulate').disabled = set.views.length < 2;
+    });
+
+    document.getElementById('btn-triangulate').addEventListener('click', () => {
+      const setName = document.getElementById('triangulation-set-name').value || 'default';
+      const result = pointTagger.triangulate(setName);
+
+      if (result) {
+        updateStatus(`Triangulated "${setName}" with ${result.viewCount} views`, 'ready');
+      } else {
+        updateStatus('Triangulation failed - need at least 2 views', 'error');
+      }
+    });
+
+    // Image navigation
+    document.querySelectorAll('.image-nav button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const index = parseInt(btn.dataset.image);
+        loadImage(index);
+      });
+    });
+
+    updateStatus('Ready. Click "Load Depth Model" to begin.');
+  </script>
+</body>
+</html>

@@ -6,6 +6,9 @@
   "scripts": {
     "build": "vite build"
   },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
   "devDependencies": {
     "vite": "^4.0.4"
   }
