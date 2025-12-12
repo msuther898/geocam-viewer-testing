@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phone Fisheye Localization Demo - GeoCam Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #16213e;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    header .badge {
+      background: #4285f4;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .viewer-container {
+      width: 100%;
+      height: 70vh;
+      min-height: 500px;
+      background: #0f0f23;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    #viewer {
+      width: 100%;
+      height: 100%;
+    }
+
+    .instructions {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 24px;
+    }
+
+    .instructions h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #4285f4;
+    }
+
+    .instructions ol {
+      margin-left: 20px;
+      line-height: 1.8;
+    }
+
+    .instructions li {
+      margin-bottom: 8px;
+    }
+
+    .instructions code {
+      background: rgba(66, 133, 244, 0.2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 13px;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .info-card {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .info-card h3 {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .info-card .value {
+      font-size: 24px;
+      font-weight: 600;
+      color: #4285f4;
+    }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      color: #666;
+      font-size: 12px;
+    }
+
+    footer a {
+      color: #4285f4;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GeoCam Viewer - Phone Photo Localization</h1>
+    <span class="badge">Demo</span>
+  </header>
+
+  <div class="container">
+    <div class="viewer-container">
+      <div id="viewer"></div>
+    </div>
+
+    <div class="instructions">
+      <h2>How to Use</h2>
+      <ol>
+        <li>Click the <strong>phone camera icon</strong> in the top-right corner of the viewer</li>
+        <li>Upload a phone photo by dragging it onto the dropzone or clicking to browse</li>
+        <li>Adjust the estimated <strong>FOV</strong> and <strong>Facing</strong> values if needed</li>
+        <li>Click <strong>"Localize in Panorama"</strong> to find the viewpoint</li>
+        <li>The viewer will navigate to the matched position and show results</li>
+      </ol>
+    </div>
+
+    <div class="info-grid">
+      <div class="info-card">
+        <h3>Current Shot</h3>
+        <div class="value" id="shot-id">--</div>
+      </div>
+      <div class="info-card">
+        <h3>Facing (Azimuth)</h3>
+        <div class="value" id="facing-value">--</div>
+      </div>
+      <div class="info-card">
+        <h3>Horizon (Tilt)</h3>
+        <div class="value" id="horizon-value">--</div>
+      </div>
+      <div class="info-card">
+        <h3>Field of View</h3>
+        <div class="value" id="fov-value">--</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>
+      GeoCam Viewer |
+      <a href="https://github.com/msuther898/geocam-viewer-testing" target="_blank">GitHub</a> |
+      Phone localization powered by fisheye matching
+    </p>
+  </footer>
+
+  <script type="module">
+    import { viewer, phoneFisheyePlugin } from '../src/index.js';
+
+    // Initialize viewer with phone fisheye plugin
+    const viewerInstance = new viewer(document.getElementById('viewer'), {
+      plugins: [phoneFisheyePlugin]
+    });
+
+    // Set up viewer with default configuration
+    viewerInstance.setup({
+      fov: 60,
+      aspect: window.innerWidth / window.innerHeight
+    });
+
+    // Load a sample panorama (Bridge Scene from CLAUDE.md)
+    // You can change this to any GeoCam panorama URL
+    const sampleShot = {
+      calibration: '6',
+      source: '1270',
+      shot: '102'
+    };
+
+    const baseUrl = 'https://manager.geocam.xyz';
+    const urls = [
+      [`${baseUrl}/${sampleShot.calibration}/${sampleShot.source}/${sampleShot.shot}/0.jpg`],
+      [`${baseUrl}/${sampleShot.calibration}/${sampleShot.source}/${sampleShot.shot}/1.jpg`],
+      [`${baseUrl}/${sampleShot.calibration}/${sampleShot.source}/${sampleShot.shot}/2.jpg`]
+    ];
+
+    const hemispheres = [
+      `${baseUrl}/calibration/${sampleShot.calibration}/hemisphere_0.obj`,
+      `${baseUrl}/calibration/${sampleShot.calibration}/hemisphere_1.obj`,
+      `${baseUrl}/calibration/${sampleShot.calibration}/hemisphere_2.obj`
+    ];
+
+    // Show the panorama
+    viewerInstance.show(urls, 0, hemispheres);
+
+    // Update info cards when viewer state changes
+    viewerInstance.shot((v) => {
+      document.getElementById('shot-id').textContent = v || sampleShot.shot;
+    });
+
+    viewerInstance.facing((v) => {
+      document.getElementById('facing-value').textContent =
+        v !== undefined ? `${v.toFixed(1)}°` : '--';
+    });
+
+    viewerInstance.horizon((v) => {
+      document.getElementById('horizon-value').textContent =
+        v !== undefined ? `${v.toFixed(1)}°` : '--';
+    });
+
+    viewerInstance.fov((v) => {
+      document.getElementById('fov-value').textContent =
+        v !== undefined ? `${v.toFixed(1)}°` : '--';
+    });
+
+    // Set initial shot ID
+    document.getElementById('shot-id').textContent = sampleShot.shot;
+
+    // Make viewer accessible for debugging
+    window.viewer = viewerInstance;
+  </script>
+</body>
+</html>

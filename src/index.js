@@ -1,4 +1,5 @@
 import { viewer as geocamViewer } from "./lib/viewer.js";
+import { phoneFisheyePlugin } from "./lib/plugin-phone-fisheye.js";
 
 export class GeocamViewer extends HTMLElement {
   static get observedAttributes() {
@@ -51,6 +52,7 @@ export class GeocamViewer extends HTMLElement {
     this.viewer = new geocamViewer(node, {
       plugins: [
         // Plugins go here
+        // phoneFisheyePlugin  // Uncomment to enable phone photo localization
       ],
     });
 
@@ -88,3 +90,7 @@ export class GeocamViewer extends HTMLElement {
 }
 
 window.customElements.define("geocam-viewer", GeocamViewer);
+
+// Export plugins for external use
+export { phoneFisheyePlugin };
+export { geocamViewer as viewer };
