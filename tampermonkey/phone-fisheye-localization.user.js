@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      2.0.0
-// @description  Localize phone photos within GeoCam panorama views using OpenCV feature matching
+// @version      3.0.0
+// @description  Localize phone photos within GeoCam panorama views with image overlay and map marker
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -221,6 +221,24 @@
             box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
         }
 
+        .pf-input-group input[type="range"] {
+            padding: 0;
+            height: 6px;
+            -webkit-appearance: none;
+            background: #ddd;
+            border-radius: 3px;
+            margin-top: 8px;
+        }
+
+        .pf-input-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #4285f4;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
         .pf-btn {
             width: 100%;
             padding: 12px 16px;
@@ -263,6 +281,24 @@
 
         .pf-btn-secondary:hover {
             background: #e8eaed;
+        }
+
+        .pf-btn-success {
+            background: #34a853;
+            color: white;
+        }
+
+        .pf-btn-success:hover {
+            background: #2d8e47;
+        }
+
+        .pf-btn-warning {
+            background: #ff9800;
+            color: white;
+        }
+
+        .pf-btn-warning:hover {
+            background: #e68900;
         }
 
         .pf-status {
@@ -358,6 +394,25 @@
             font-family: 'SF Mono', Monaco, monospace;
         }
 
+        .pf-overlay-controls {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .pf-overlay-controls.visible {
+            display: block;
+        }
+
+        .pf-overlay-controls h5 {
+            margin: 0 0 10px 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: #333;
+        }
+
         .pf-match-preview {
             display: none;
             margin-top: 12px;
@@ -399,46 +454,19 @@
             z-index: 9999;
         }
 
-        .pf-marker {
+        .pf-image-overlay {
             position: absolute;
-            width: 24px;
-            height: 24px;
-            margin-left: -12px;
-            margin-top: -12px;
+            pointer-events: none;
             border: 3px solid #ff5722;
-            border-radius: 50%;
-            background: rgba(255, 87, 34, 0.25);
-            pointer-events: none;
-            animation: pf-pulse 2s ease-in-out infinite;
+            border-radius: 4px;
+            box-shadow: 0 0 20px rgba(255, 87, 34, 0.5);
+            transition: opacity 0.3s ease;
         }
 
-        .pf-marker::after {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 6px;
-            height: 6px;
-            margin: -3px 0 0 -3px;
-            background: #ff5722;
-            border-radius: 50%;
-        }
-
-        .pf-match-point {
-            position: absolute;
-            width: 8px;
-            height: 8px;
-            margin-left: -4px;
-            margin-top: -4px;
-            background: #00ff00;
-            border: 1px solid #006600;
-            border-radius: 50%;
-            pointer-events: none;
-        }
-
-        @keyframes pf-pulse {
-            0%, 100% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.3); opacity: 0.7; }
+        .pf-image-overlay img {
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
         }
 
         .pf-cv-status {
@@ -466,6 +494,45 @@
             color: #c5221f;
         }
 
+        /* Map marker styles */
+        .pf-map-marker {
+            position: absolute;
+            width: 32px;
+            height: 32px;
+            margin-left: -16px;
+            margin-top: -32px;
+            cursor: pointer;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+            transition: transform 0.2s ease;
+            z-index: 1000;
+        }
+
+        .pf-map-marker:hover {
+            transform: scale(1.2);
+        }
+
+        .pf-map-marker svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .pf-map-marker-pulse {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            margin-left: -20px;
+            margin-top: -20px;
+            border-radius: 50%;
+            background: rgba(255, 87, 34, 0.3);
+            animation: pf-marker-pulse 2s ease-out infinite;
+            pointer-events: none;
+        }
+
+        @keyframes pf-marker-pulse {
+            0% { transform: scale(0.5); opacity: 1; }
+            100% { transform: scale(2); opacity: 0; }
+        }
+
         /* Dark mode support */
         @media (prefers-color-scheme: dark) {
             .pf-panel {
@@ -484,6 +551,8 @@
             .pf-btn-secondary { background: #3a3a3a; color: #eee; }
             .pf-result-item { background: #2a2a2a; }
             .pf-result-item .value { color: #eee; }
+            .pf-overlay-controls { background: #2a2a2a; }
+            .pf-overlay-controls h5 { color: #eee; }
             .pf-close { color: #aaa; }
             .pf-close:hover { color: #eee; }
             .pf-cv-status { background: #2a2a2a; color: #aaa; }
@@ -498,7 +567,25 @@
         crosshair: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>`,
         navigate: `<svg viewBox="0 0 24 24"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>`,
         trash: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`,
-        search: `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`
+        search: `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
+        layers: `<svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+        mapPin: `<svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`,
+        eye: `<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+        eyeOff: `<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`,
+        // Phone marker icon for map
+        phoneMarker: `<svg viewBox="0 0 32 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M16 0C7.16 0 0 7.16 0 16c0 12 16 24 16 24s16-12 16-24c0-8.84-7.16-16-16-16z" fill="#ff5722"/>
+            <path d="M16 0C7.16 0 0 7.16 0 16c0 12 16 24 16 24s16-12 16-24c0-8.84-7.16-16-16-16z" fill="url(#grad)" opacity="0.3"/>
+            <rect x="10" y="6" width="12" height="20" rx="2" fill="white"/>
+            <circle cx="16" cy="14" r="3" stroke="#ff5722" stroke-width="1.5" fill="none"/>
+            <circle cx="16" cy="22" r="1" fill="#ff5722"/>
+            <defs>
+                <linearGradient id="grad" x1="16" y1="0" x2="16" y2="40">
+                    <stop offset="0%" stop-color="white"/>
+                    <stop offset="100%" stop-color="transparent"/>
+                </linearGradient>
+            </defs>
+        </svg>`
     };
 
     // ============================================
@@ -512,7 +599,6 @@
         }
 
         async init() {
-            // Wait for OpenCV to be ready
             if (typeof cv === 'undefined') {
                 console.log('[FeatureMatcher] Waiting for OpenCV...');
                 await this.waitForOpenCV();
@@ -521,11 +607,8 @@
             if (cv.getBuildInformation) {
                 console.log('[FeatureMatcher] OpenCV loaded');
                 this.cvReady = true;
-
-                // Initialize ORB detector and BFMatcher
-                this.orb = new cv.ORB(2000); // Max 2000 features
-                this.bf = new cv.BFMatcher(cv.NORM_HAMMING, true); // Cross-check enabled
-
+                this.orb = new cv.ORB(2000);
+                this.bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
                 return true;
             }
             return false;
@@ -537,16 +620,12 @@
                     resolve();
                     return;
                 }
-
-                // Check periodically
                 const checkInterval = setInterval(() => {
                     if (typeof cv !== 'undefined' && cv.getBuildInformation) {
                         clearInterval(checkInterval);
                         resolve();
                     }
                 }, 100);
-
-                // Timeout after 30 seconds
                 setTimeout(() => {
                     clearInterval(checkInterval);
                     resolve();
@@ -554,13 +633,9 @@
             });
         }
 
-        // Convert image element to cv.Mat
-        imageToMat(img) {
+        imageToMat(img, maxSize = 800) {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-
-            // Scale down large images for performance
-            const maxSize = 800;
             let width = img.naturalWidth || img.width;
             let height = img.naturalHeight || img.height;
 
@@ -575,30 +650,21 @@
             ctx.drawImage(img, 0, 0, width, height);
 
             const imageData = ctx.getImageData(0, 0, width, height);
-            const mat = cv.matFromImageData(imageData);
-            return mat;
+            return { mat: cv.matFromImageData(imageData), width, height };
         }
 
-        // Capture current panorama view from canvas
         capturePanoramaView() {
             const canvas = document.querySelector('canvas');
-            if (!canvas) {
-                throw new Error('No canvas found for panorama capture');
-            }
+            if (!canvas) throw new Error('No canvas found');
 
             const width = canvas.width;
             const height = canvas.height;
-
-            // Get image data from WebGL canvas
             const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
             let imageData;
 
             if (gl) {
-                // WebGL canvas - need to read pixels
                 const pixels = new Uint8Array(width * height * 4);
                 gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-
-                // Flip vertically (WebGL has origin at bottom-left)
                 const flipped = new Uint8Array(width * height * 4);
                 for (let y = 0; y < height; y++) {
                     for (let x = 0; x < width; x++) {
@@ -610,82 +676,54 @@
                         flipped[dstIdx + 3] = pixels[srcIdx + 3];
                     }
                 }
-
                 imageData = new ImageData(new Uint8ClampedArray(flipped.buffer), width, height);
             } else {
-                // 2D canvas
                 const ctx = canvas.getContext('2d');
                 imageData = ctx.getImageData(0, 0, width, height);
             }
 
-            const mat = cv.matFromImageData(imageData);
-            return { mat, width, height };
+            return { mat: cv.matFromImageData(imageData), width, height, canvas };
         }
 
-        // Extract ORB features from a grayscale image
         extractFeatures(mat) {
             const gray = new cv.Mat();
             cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-
             const keypoints = new cv.KeyPointVector();
             const descriptors = new cv.Mat();
-
             this.orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
-
             gray.delete();
-
             return { keypoints, descriptors };
         }
 
-        // Match features between two images
         matchFeatures(desc1, desc2) {
-            if (desc1.rows === 0 || desc2.rows === 0) {
-                return [];
-            }
-
+            if (desc1.rows === 0 || desc2.rows === 0) return [];
             const matches = new cv.DMatchVector();
-
             try {
                 this.bf.match(desc1, desc2, matches);
             } catch (e) {
                 console.error('[FeatureMatcher] Matching error:', e);
                 return [];
             }
-
-            // Convert to array and sort by distance
             const matchArray = [];
             for (let i = 0; i < matches.size(); i++) {
                 matchArray.push(matches.get(i));
             }
-
             matchArray.sort((a, b) => a.distance - b.distance);
-
             matches.delete();
-
             return matchArray;
         }
 
-        // Filter matches using Lowe's ratio test (adapted for cross-check)
-        filterMatches(matches, ratio = 0.75) {
+        filterMatches(matches) {
             if (matches.length < 10) return matches;
-
-            // With cross-check, use distance threshold instead
-            const distances = matches.map(m => m.distance);
-            const medianDist = distances.sort((a, b) => a - b)[Math.floor(distances.length / 2)];
-            const threshold = medianDist * 1.5;
-
-            return matches.filter(m => m.distance < threshold);
+            const distances = matches.map(m => m.distance).sort((a, b) => a - b);
+            const medianDist = distances[Math.floor(distances.length / 2)];
+            return matches.filter(m => m.distance < medianDist * 1.5);
         }
 
-        // Compute homography from matches
         computeHomography(kp1, kp2, matches) {
-            if (matches.length < 4) {
-                return null;
-            }
+            if (matches.length < 4) return null;
 
-            const srcPoints = [];
-            const dstPoints = [];
-
+            const srcPoints = [], dstPoints = [];
             for (const match of matches) {
                 const pt1 = kp1.get(match.queryIdx).pt;
                 const pt2 = kp2.get(match.trainIdx).pt;
@@ -695,11 +733,9 @@
 
             const srcMat = cv.matFromArray(matches.length, 1, cv.CV_32FC2, srcPoints);
             const dstMat = cv.matFromArray(matches.length, 1, cv.CV_32FC2, dstPoints);
-
             const mask = new cv.Mat();
             const H = cv.findHomography(srcMat, dstMat, cv.RANSAC, 5.0, mask);
 
-            // Count inliers
             let inliers = 0;
             for (let i = 0; i < mask.rows; i++) {
                 if (mask.data[i] > 0) inliers++;
@@ -712,71 +748,76 @@
             return { homography: H, inliers, total: matches.length };
         }
 
-        // Estimate pose from homography
-        // This extracts rotation and translation from homography matrix
         estimatePoseFromHomography(H, imgWidth, imgHeight, fov) {
-            if (!H || H.rows !== 3 || H.cols !== 3) {
-                return null;
-            }
+            if (!H || H.rows !== 3 || H.cols !== 3) return null;
 
-            // Approximate camera intrinsics
             const f = imgWidth / (2 * Math.tan(fov * Math.PI / 360));
-            const cx = imgWidth / 2;
-            const cy = imgHeight / 2;
+            const cx = imgWidth / 2, cy = imgHeight / 2;
 
-            // Get homography elements
             const h = [];
             for (let i = 0; i < 9; i++) {
                 h.push(H.doubleAt(Math.floor(i / 3), i % 3));
             }
 
-            // Decompose homography to get rotation
-            // Simplified approach: extract rotation from homography
-            // H = K * R * K^-1 approximately for small translations
-
-            // Calculate center offset in normalized coordinates
             const centerX = (h[0] * cx + h[1] * cy + h[2]) / (h[6] * cx + h[7] * cy + h[8]);
             const centerY = (h[3] * cx + h[4] * cy + h[5]) / (h[6] * cx + h[7] * cy + h[8]);
 
-            // Convert to angular offset
             const deltaX = (centerX - cx) / f;
             const deltaY = (centerY - cy) / f;
 
-            // Convert to degrees
-            const yawOffset = Math.atan(deltaX) * 180 / Math.PI;
-            const pitchOffset = Math.atan(deltaY) * 180 / Math.PI;
-
-            // Estimate scale/zoom factor
-            const scale = Math.sqrt(h[0] * h[0] + h[3] * h[3]);
-
             return {
-                yawOffset,
-                pitchOffset,
-                scale
+                yawOffset: Math.atan(deltaX) * 180 / Math.PI,
+                pitchOffset: Math.atan(deltaY) * 180 / Math.PI,
+                scale: Math.sqrt(h[0] * h[0] + h[3] * h[3])
             };
         }
 
-        // Draw matches on a canvas
+        // Warp phone image to panorama coordinates and get bounding box
+        warpImageBounds(H, phoneWidth, phoneHeight, panoWidth, panoHeight) {
+            // Transform corners of phone image
+            const corners = [
+                [0, 0], [phoneWidth, 0],
+                [phoneWidth, phoneHeight], [0, phoneHeight]
+            ];
+
+            const h = [];
+            for (let i = 0; i < 9; i++) {
+                h.push(H.doubleAt(Math.floor(i / 3), i % 3));
+            }
+
+            const transformedCorners = corners.map(([x, y]) => {
+                const w = h[6] * x + h[7] * y + h[8];
+                return {
+                    x: (h[0] * x + h[1] * y + h[2]) / w,
+                    y: (h[3] * x + h[4] * y + h[5]) / w
+                };
+            });
+
+            // Get bounding box
+            const xs = transformedCorners.map(p => p.x);
+            const ys = transformedCorners.map(p => p.y);
+
+            return {
+                minX: Math.min(...xs),
+                maxX: Math.max(...xs),
+                minY: Math.min(...ys),
+                maxY: Math.max(...ys),
+                corners: transformedCorners
+            };
+        }
+
         drawMatches(img1Mat, kp1, img2Mat, kp2, matches, canvas) {
             const outMat = new cv.Mat();
-
-            // Convert keypoint vectors if needed
             const matchVector = new cv.DMatchVector();
-            const goodMatches = matches.slice(0, Math.min(50, matches.length));
-            goodMatches.forEach(m => matchVector.push_back(m));
-
+            matches.slice(0, Math.min(50, matches.length)).forEach(m => matchVector.push_back(m));
             cv.drawMatches(img1Mat, kp1, img2Mat, kp2, matchVector, outMat);
-
             cv.imshow(canvas, outMat);
-
             outMat.delete();
             matchVector.delete();
         }
 
         cleanup(mats) {
-            mats.forEach(m => {
-                if (m && m.delete) m.delete();
-            });
+            mats.forEach(m => { if (m && m.delete) m.delete(); });
         }
     }
 
@@ -790,20 +831,21 @@
             this.overlay = null;
             this.currentFile = null;
             this.phoneImage = null;
-            this.estimatedFov = 60;
-            this.estimatedFacing = 0;
-            this.estimatedHorizon = 0;
+            this.estimatedFov = 70;
             this.isMatching = false;
-            this.viewerElement = null;
             this.matcher = new FeatureMatcher();
             this.matchCanvas = null;
-            this.searchRadius = 30; // degrees to search around initial estimate
+            this.lastHomography = null;
+            this.lastResult = null;
+            this.imageOverlay = null;
+            this.mapMarker = null;
+            this.overlayOpacity = 0.7;
+            this.overlayVisible = true;
 
             this.init();
         }
 
         async init() {
-            // Inject styles
             if (typeof GM_addStyle !== 'undefined') {
                 GM_addStyle(STYLES);
             } else {
@@ -812,39 +854,27 @@
                 document.head.appendChild(style);
             }
 
-            // Create UI
             this.createButton();
             this.createPanel();
             this.createOverlay();
 
-            // Find viewer element
-            this.findViewer();
-
-            // Set up URL hash listener
-            this.setupHashListener();
-
-            // Initialize OpenCV
             this.updateCvStatus('loading', 'Loading OpenCV.js...');
             const cvLoaded = await this.matcher.init();
-            if (cvLoaded) {
-                this.updateCvStatus('ready', 'OpenCV ready - ORB feature matching enabled');
-            } else {
-                this.updateCvStatus('error', 'OpenCV failed to load - using fallback mode');
-            }
+            this.updateCvStatus(
+                cvLoaded ? 'ready' : 'error',
+                cvLoaded ? 'OpenCV ready' : 'OpenCV failed to load'
+            );
 
-            console.log('[PhoneFisheye] Initialized with OpenCV:', cvLoaded);
-        }
+            // Listen for view changes to update overlay position
+            window.addEventListener('hashchange', () => this.updateOverlayPosition());
 
-        findViewer() {
-            this.viewerElement = document.querySelector('geocam-viewer') ||
-                                 document.querySelector('.geocam-viewer') ||
-                                 document.querySelector('[class*="viewer"]');
+            console.log('[PhoneFisheye] Initialized v3.0');
         }
 
         createButton() {
             this.button = document.createElement('button');
             this.button.className = 'pf-button';
-            this.button.title = 'Phone Photo Localization (OpenCV)';
+            this.button.title = 'Phone Photo Localization';
             this.button.innerHTML = ICONS.phone;
             this.button.addEventListener('click', () => this.togglePanel());
             document.body.appendChild(this.button);
@@ -857,7 +887,7 @@
                 <button class="pf-close">&times;</button>
                 <h3>${ICONS.phone} Phone Photo Localization</h3>
 
-                <div class="pf-cv-status loading">Initializing OpenCV...</div>
+                <div class="pf-cv-status loading">Initializing...</div>
 
                 <div class="pf-dropzone">
                     <div class="pf-dropzone-icon">+</div>
@@ -875,7 +905,6 @@
                 </div>
 
                 <div class="pf-status"></div>
-
                 <div class="pf-progress">
                     <div class="pf-progress-bar">
                         <div class="pf-progress-fill" style="width: 0%"></div>
@@ -887,33 +916,34 @@
                         <label>Phone FOV (&deg;)</label>
                         <input type="number" class="pf-fov" value="70" min="30" max="120" />
                     </div>
-                    <div class="pf-input-group">
-                        <label>Search Radius (&deg;)</label>
-                        <input type="number" class="pf-search-radius" value="30" min="5" max="90" />
-                    </div>
-                </div>
-
-                <div class="pf-input-row">
-                    <div class="pf-input-group">
-                        <label>Initial Facing (&deg;)</label>
-                        <input type="number" class="pf-facing" value="0" min="0" max="360" />
-                    </div>
-                    <div class="pf-input-group">
-                        <label>Initial Horizon (&deg;)</label>
-                        <input type="number" class="pf-horizon" value="0" min="-90" max="90" />
-                    </div>
                 </div>
 
                 <button class="pf-btn pf-btn-primary pf-localize-btn" disabled>
-                    ${ICONS.search} Match Features
+                    ${ICONS.search} Match & Overlay
                 </button>
 
                 <button class="pf-btn pf-btn-secondary pf-navigate-btn" style="display:none">
                     ${ICONS.navigate} Navigate to Position
                 </button>
 
+                <div class="pf-overlay-controls">
+                    <h5>${ICONS.layers} Overlay Controls</h5>
+                    <div class="pf-input-row">
+                        <div class="pf-input-group">
+                            <label>Opacity: <span class="opacity-value">70%</span></label>
+                            <input type="range" class="pf-opacity" value="70" min="0" max="100" />
+                        </div>
+                    </div>
+                    <button class="pf-btn pf-btn-warning pf-toggle-overlay-btn">
+                        ${ICONS.eyeOff} Hide Overlay
+                    </button>
+                    <button class="pf-btn pf-btn-success pf-add-marker-btn">
+                        ${ICONS.mapPin} Add Map Marker
+                    </button>
+                </div>
+
                 <button class="pf-btn pf-btn-secondary pf-clear-btn" style="display:none">
-                    ${ICONS.trash} Clear Photo
+                    ${ICONS.trash} Clear All
                 </button>
 
                 <div class="pf-results">
@@ -923,11 +953,11 @@
 
                 <div class="pf-match-preview">
                     <canvas class="pf-match-canvas"></canvas>
-                    <div class="pf-match-preview-label">Feature matches (green lines)</div>
+                    <div class="pf-match-preview-label">Feature matches</div>
                 </div>
 
                 <div class="pf-help">
-                    Uses ORB feature detection + RANSAC<br>for robust image matching
+                    ORB features + RANSAC homography<br>Image overlay + map marker
                 </div>
             `;
 
@@ -943,111 +973,55 @@
         }
 
         updateCvStatus(state, message) {
-            const statusEl = this.panel.querySelector('.pf-cv-status');
-            if (statusEl) {
-                statusEl.className = `pf-cv-status ${state}`;
-                statusEl.textContent = message;
+            const el = this.panel.querySelector('.pf-cv-status');
+            if (el) {
+                el.className = `pf-cv-status ${state}`;
+                el.textContent = message;
             }
         }
 
         setupPanelEvents() {
             const dropzone = this.panel.querySelector('.pf-dropzone');
             const fileInput = this.panel.querySelector('.pf-file-input');
-            const closeBtn = this.panel.querySelector('.pf-close');
-            const localizeBtn = this.panel.querySelector('.pf-localize-btn');
-            const navigateBtn = this.panel.querySelector('.pf-navigate-btn');
-            const clearBtn = this.panel.querySelector('.pf-clear-btn');
-            const fovInput = this.panel.querySelector('.pf-fov');
-            const facingInput = this.panel.querySelector('.pf-facing');
-            const horizonInput = this.panel.querySelector('.pf-horizon');
-            const searchRadiusInput = this.panel.querySelector('.pf-search-radius');
 
-            closeBtn.addEventListener('click', () => this.hidePanel());
+            this.panel.querySelector('.pf-close').addEventListener('click', () => this.hidePanel());
             dropzone.addEventListener('click', () => fileInput.click());
 
             fileInput.addEventListener('change', (e) => {
-                if (e.target.files && e.target.files[0]) {
-                    this.handleFile(e.target.files[0]);
-                }
+                if (e.target.files?.[0]) this.handleFile(e.target.files[0]);
             });
 
-            dropzone.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                dropzone.classList.add('dragover');
-            });
-
-            dropzone.addEventListener('dragleave', () => {
-                dropzone.classList.remove('dragover');
-            });
-
+            dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+            dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
             dropzone.addEventListener('drop', (e) => {
                 e.preventDefault();
                 dropzone.classList.remove('dragover');
-                if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                    this.handleFile(e.dataTransfer.files[0]);
-                }
+                if (e.dataTransfer.files?.[0]) this.handleFile(e.dataTransfer.files[0]);
             });
 
-            localizeBtn.addEventListener('click', () => this.startLocalization());
-            navigateBtn.addEventListener('click', () => this.navigateToResult());
-            clearBtn.addEventListener('click', () => this.clearPhoto());
+            this.panel.querySelector('.pf-localize-btn').addEventListener('click', () => this.startLocalization());
+            this.panel.querySelector('.pf-navigate-btn').addEventListener('click', () => this.navigateToResult());
+            this.panel.querySelector('.pf-clear-btn').addEventListener('click', () => this.clearAll());
 
-            fovInput.addEventListener('change', (e) => {
+            this.panel.querySelector('.pf-fov').addEventListener('change', (e) => {
                 this.estimatedFov = parseFloat(e.target.value) || 70;
             });
 
-            facingInput.addEventListener('change', (e) => {
-                this.estimatedFacing = parseFloat(e.target.value) || 0;
+            // Overlay controls
+            const opacitySlider = this.panel.querySelector('.pf-opacity');
+            opacitySlider.addEventListener('input', (e) => {
+                this.overlayOpacity = parseInt(e.target.value) / 100;
+                this.panel.querySelector('.opacity-value').textContent = `${e.target.value}%`;
+                this.updateOverlayOpacity();
             });
 
-            horizonInput.addEventListener('change', (e) => {
-                this.estimatedHorizon = parseFloat(e.target.value) || 0;
-            });
-
-            searchRadiusInput.addEventListener('change', (e) => {
-                this.searchRadius = parseFloat(e.target.value) || 30;
-            });
-        }
-
-        setupHashListener() {
-            const updateFromHash = () => {
-                const params = new URLSearchParams(window.location.hash.substring(1));
-                const facing = params.get('facing');
-                const horizon = params.get('horizon');
-                const fov = params.get('fov');
-
-                if (facing && !this.currentFile) {
-                    this.panel.querySelector('.pf-facing').value = Math.round(parseFloat(facing));
-                    this.estimatedFacing = parseFloat(facing);
-                }
-                if (horizon && !this.currentFile) {
-                    this.panel.querySelector('.pf-horizon').value = Math.round(parseFloat(horizon));
-                    this.estimatedHorizon = parseFloat(horizon);
-                }
-            };
-
-            window.addEventListener('hashchange', updateFromHash);
-            updateFromHash();
+            this.panel.querySelector('.pf-toggle-overlay-btn').addEventListener('click', () => this.toggleOverlay());
+            this.panel.querySelector('.pf-add-marker-btn').addEventListener('click', () => this.addMapMarker());
         }
 
         togglePanel() {
-            if (this.panel.classList.contains('visible')) {
-                this.hidePanel();
-            } else {
-                this.showPanel();
-            }
-        }
-
-        showPanel() {
-            this.panel.classList.add('visible');
-            this.button.classList.add('active');
-
-            const params = new URLSearchParams(window.location.hash.substring(1));
-            const facing = params.get('facing');
-            if (facing && !this.currentFile) {
-                this.panel.querySelector('.pf-facing').value = Math.round(parseFloat(facing));
-                this.estimatedFacing = parseFloat(facing);
-            }
+            this.panel.classList.toggle('visible');
+            this.button.classList.toggle('active');
         }
 
         hidePanel() {
@@ -1062,29 +1036,20 @@
             }
 
             this.currentFile = file;
-
             const reader = new FileReader();
             reader.onload = (e) => {
                 const preview = this.panel.querySelector('.pf-preview');
                 const previewImg = this.panel.querySelector('.pf-preview-img');
-                const filename = this.panel.querySelector('.filename');
-                const dimensions = this.panel.querySelector('.dimensions');
-                const dropzone = this.panel.querySelector('.pf-dropzone');
 
                 previewImg.src = e.target.result;
                 preview.classList.add('visible');
-                dropzone.style.display = 'none';
+                this.panel.querySelector('.pf-dropzone').style.display = 'none';
 
-                // Store image for processing
                 this.phoneImage = new Image();
                 this.phoneImage.onload = () => {
-                    filename.textContent = file.name;
-                    dimensions.textContent = `${this.phoneImage.width}x${this.phoneImage.height}`;
-
-                    // Estimate FOV from aspect ratio
-                    const aspectRatio = this.phoneImage.width / this.phoneImage.height;
-                    this.estimatedFov = aspectRatio > 1 ? 70 : 55;
-                    this.panel.querySelector('.pf-fov').value = this.estimatedFov;
+                    this.panel.querySelector('.filename').textContent = file.name;
+                    this.panel.querySelector('.dimensions').textContent =
+                        `${this.phoneImage.width}x${this.phoneImage.height}`;
                 };
                 this.phoneImage.src = e.target.result;
             };
@@ -1092,52 +1057,54 @@
 
             this.panel.querySelector('.pf-localize-btn').disabled = false;
             this.panel.querySelector('.pf-clear-btn').style.display = 'block';
-            this.showStatus('Photo loaded. Click "Match Features" to localize.', 'info');
+            this.showStatus('Photo loaded. Click "Match & Overlay" to localize.', 'info');
         }
 
-        clearPhoto() {
+        clearAll() {
             this.currentFile = null;
             this.phoneImage = null;
             this.lastResult = null;
+            this.lastHomography = null;
 
-            const preview = this.panel.querySelector('.pf-preview');
-            const dropzone = this.panel.querySelector('.pf-dropzone');
-            const fileInput = this.panel.querySelector('.pf-file-input');
-            const localizeBtn = this.panel.querySelector('.pf-localize-btn');
-            const navigateBtn = this.panel.querySelector('.pf-navigate-btn');
-            const clearBtn = this.panel.querySelector('.pf-clear-btn');
-            const results = this.panel.querySelector('.pf-results');
-            const matchPreview = this.panel.querySelector('.pf-match-preview');
+            // Remove overlay image
+            if (this.imageOverlay) {
+                this.imageOverlay.remove();
+                this.imageOverlay = null;
+            }
 
-            preview.classList.remove('visible');
-            dropzone.style.display = 'block';
-            fileInput.value = '';
-            localizeBtn.disabled = true;
-            navigateBtn.style.display = 'none';
-            clearBtn.style.display = 'none';
-            results.classList.remove('visible');
-            matchPreview.classList.remove('visible');
+            // Remove map marker
+            if (this.mapMarker) {
+                this.mapMarker.remove();
+                this.mapMarker = null;
+            }
+
+            this.panel.querySelector('.pf-preview').classList.remove('visible');
+            this.panel.querySelector('.pf-dropzone').style.display = 'block';
+            this.panel.querySelector('.pf-file-input').value = '';
+            this.panel.querySelector('.pf-localize-btn').disabled = true;
+            this.panel.querySelector('.pf-navigate-btn').style.display = 'none';
+            this.panel.querySelector('.pf-clear-btn').style.display = 'none';
+            this.panel.querySelector('.pf-results').classList.remove('visible');
+            this.panel.querySelector('.pf-match-preview').classList.remove('visible');
+            this.panel.querySelector('.pf-overlay-controls').classList.remove('visible');
 
             this.hideStatus();
             this.hideProgress();
-            this.clearOverlay();
         }
 
-        showStatus(message, type = 'info') {
-            const status = this.panel.querySelector('.pf-status');
-            status.textContent = message;
-            status.className = `pf-status visible ${type}`;
+        showStatus(msg, type = 'info') {
+            const el = this.panel.querySelector('.pf-status');
+            el.textContent = msg;
+            el.className = `pf-status visible ${type}`;
         }
 
         hideStatus() {
             this.panel.querySelector('.pf-status').classList.remove('visible');
         }
 
-        showProgress(percent) {
-            const progress = this.panel.querySelector('.pf-progress');
-            const fill = this.panel.querySelector('.pf-progress-fill');
-            progress.classList.add('visible');
-            fill.style.width = `${percent}%`;
+        showProgress(pct) {
+            this.panel.querySelector('.pf-progress').classList.add('visible');
+            this.panel.querySelector('.pf-progress-fill').style.width = `${pct}%`;
         }
 
         hideProgress() {
@@ -1151,135 +1118,99 @@
             }
 
             if (!this.matcher.cvReady) {
-                this.showStatus('OpenCV not loaded. Please wait or refresh.', 'error');
+                this.showStatus('OpenCV not ready', 'error');
                 return;
             }
 
-            const localizeBtn = this.panel.querySelector('.pf-localize-btn');
-            localizeBtn.disabled = true;
+            const btn = this.panel.querySelector('.pf-localize-btn');
+            btn.disabled = true;
             this.isMatching = true;
 
             try {
-                // Step 1: Extract features from phone image
-                this.showStatus('Extracting features from phone photo...', 'loading');
+                this.showStatus('Extracting features...', 'loading');
                 this.showProgress(10);
                 await this.delay(50);
 
-                const phoneMat = this.matcher.imageToMat(this.phoneImage);
+                const { mat: phoneMat, width: phoneW, height: phoneH } = this.matcher.imageToMat(this.phoneImage);
                 const phoneFeatures = this.matcher.extractFeatures(phoneMat);
 
-                console.log(`[PhoneFisheye] Phone image: ${phoneFeatures.keypoints.size()} keypoints`);
-
                 if (phoneFeatures.keypoints.size() < 10) {
-                    throw new Error('Not enough features in phone photo. Try a more textured image.');
+                    throw new Error('Not enough features in photo');
                 }
 
                 this.showProgress(30);
-
-                // Step 2: Capture current panorama view
-                this.showStatus('Capturing panorama view...', 'loading');
+                this.showStatus('Capturing panorama...', 'loading');
                 await this.delay(50);
 
-                const { mat: panoMat, width: panoWidth, height: panoHeight } = this.matcher.capturePanoramaView();
+                const { mat: panoMat, width: panoW, height: panoH, canvas: panoCanvas } = this.matcher.capturePanoramaView();
                 const panoFeatures = this.matcher.extractFeatures(panoMat);
 
-                console.log(`[PhoneFisheye] Panorama view: ${panoFeatures.keypoints.size()} keypoints`);
-
                 this.showProgress(50);
-
-                // Step 3: Match features
                 this.showStatus('Matching features...', 'loading');
                 await this.delay(50);
 
-                const matches = this.matcher.matchFeatures(
-                    phoneFeatures.descriptors,
-                    panoFeatures.descriptors
-                );
-
-                console.log(`[PhoneFisheye] Raw matches: ${matches.length}`);
-
-                // Filter matches
+                const matches = this.matcher.matchFeatures(phoneFeatures.descriptors, panoFeatures.descriptors);
                 const goodMatches = this.matcher.filterMatches(matches);
-                console.log(`[PhoneFisheye] Filtered matches: ${goodMatches.length}`);
-
-                this.showProgress(70);
 
                 if (goodMatches.length < 8) {
-                    throw new Error(`Only ${goodMatches.length} matches found. Need at least 8. Try adjusting view.`);
+                    throw new Error(`Only ${goodMatches.length} matches. Need 8+.`);
                 }
 
-                // Step 4: Compute homography
+                this.showProgress(70);
                 this.showStatus('Computing homography...', 'loading');
                 await this.delay(50);
 
-                const homographyResult = this.matcher.computeHomography(
-                    phoneFeatures.keypoints,
-                    panoFeatures.keypoints,
-                    goodMatches
+                const homResult = this.matcher.computeHomography(
+                    phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
                 );
 
-                this.showProgress(85);
-
-                if (!homographyResult || homographyResult.inliers < 4) {
-                    throw new Error('Could not compute valid homography. Try different view.');
+                if (!homResult || homResult.inliers < 4) {
+                    throw new Error('Could not compute homography');
                 }
 
-                console.log(`[PhoneFisheye] Homography: ${homographyResult.inliers}/${homographyResult.total} inliers`);
+                this.lastHomography = {
+                    H: homResult.homography,
+                    phoneW, phoneH, panoW, panoH,
+                    panoCanvas
+                };
 
-                // Step 5: Estimate pose
-                this.showStatus('Estimating camera pose...', 'loading');
+                this.showProgress(85);
+                this.showStatus('Estimating pose...', 'loading');
                 await this.delay(50);
 
                 const pose = this.matcher.estimatePoseFromHomography(
-                    homographyResult.homography,
-                    panoWidth,
-                    panoHeight,
-                    this.estimatedFov
+                    homResult.homography, panoW, panoH, this.estimatedFov
                 );
 
-                this.showProgress(95);
-
-                // Get current viewer state
                 const params = new URLSearchParams(window.location.hash.substring(1));
                 const currentFacing = parseFloat(params.get('facing') || '0');
                 const currentHorizon = parseFloat(params.get('horizon') || '0');
 
-                // Calculate final pose
-                const result = {
+                this.lastResult = {
                     facing: (currentFacing + pose.yawOffset + 360) % 360,
-                    horizon: currentHorizon + pose.pitchOffset,
-                    fov: this.estimatedFov / pose.scale,
+                    horizon: Math.max(-85, Math.min(85, currentHorizon + pose.pitchOffset)),
+                    fov: Math.max(10, Math.min(120, this.estimatedFov / pose.scale)),
                     matches: goodMatches.length,
-                    inliers: homographyResult.inliers,
-                    confidence: homographyResult.inliers / homographyResult.total
+                    inliers: homResult.inliers,
+                    confidence: homResult.inliers / homResult.total
                 };
 
-                // Clamp values
-                result.horizon = Math.max(-85, Math.min(85, result.horizon));
-                result.fov = Math.max(10, Math.min(120, result.fov));
-
-                this.lastResult = result;
-
-                // Draw matches
-                this.matcher.drawMatches(
-                    phoneMat, phoneFeatures.keypoints,
-                    panoMat, panoFeatures.keypoints,
-                    goodMatches,
-                    this.matchCanvas
-                );
+                // Draw match visualization
+                this.matcher.drawMatches(phoneMat, phoneFeatures.keypoints,
+                    panoMat, panoFeatures.keypoints, goodMatches, this.matchCanvas);
                 this.panel.querySelector('.pf-match-preview').classList.add('visible');
 
-                // Show results
-                this.showResults(result);
+                // Create image overlay on panorama
+                this.createImageOverlay();
+
+                // Show results and controls
+                this.showResults(this.lastResult);
+                this.panel.querySelector('.pf-overlay-controls').classList.add('visible');
                 this.showStatus('Localization complete!', 'success');
                 this.showProgress(100);
 
-                // Cleanup
-                this.matcher.cleanup([
-                    phoneMat, panoMat,
-                    phoneFeatures.descriptors, panoFeatures.descriptors,
-                    homographyResult.homography
-                ]);
+                // Cleanup OpenCV mats
+                this.matcher.cleanup([phoneMat, panoMat, phoneFeatures.descriptors, panoFeatures.descriptors]);
                 phoneFeatures.keypoints.delete();
                 panoFeatures.keypoints.delete();
 
@@ -1290,74 +1221,193 @@
                 this.showStatus(err.message || 'Localization failed', 'error');
                 this.hideProgress();
             } finally {
-                localizeBtn.disabled = false;
-                localizeBtn.innerHTML = `${ICONS.search} Match Features`;
+                btn.disabled = false;
+                btn.innerHTML = `${ICONS.search} Match & Overlay`;
                 this.isMatching = false;
             }
         }
 
-        showResults(result) {
-            const results = this.panel.querySelector('.pf-results');
-            const content = this.panel.querySelector('.pf-results-content');
-            const navigateBtn = this.panel.querySelector('.pf-navigate-btn');
+        createImageOverlay() {
+            if (!this.lastHomography || !this.phoneImage) return;
 
+            // Remove existing overlay
+            if (this.imageOverlay) {
+                this.imageOverlay.remove();
+            }
+
+            const { H, phoneW, phoneH, panoW, panoH, panoCanvas } = this.lastHomography;
+            const bounds = this.matcher.warpImageBounds(H, phoneW, phoneH, panoW, panoH);
+
+            // Get canvas position on screen
+            const canvasRect = panoCanvas.getBoundingClientRect();
+
+            // Scale bounds to screen coordinates
+            const scaleX = canvasRect.width / panoW;
+            const scaleY = canvasRect.height / panoH;
+
+            const overlayLeft = canvasRect.left + bounds.minX * scaleX;
+            const overlayTop = canvasRect.top + bounds.minY * scaleY;
+            const overlayWidth = (bounds.maxX - bounds.minX) * scaleX;
+            const overlayHeight = (bounds.maxY - bounds.minY) * scaleY;
+
+            // Create overlay element
+            this.imageOverlay = document.createElement('div');
+            this.imageOverlay.className = 'pf-image-overlay';
+            this.imageOverlay.style.cssText = `
+                left: ${overlayLeft}px;
+                top: ${overlayTop}px;
+                width: ${overlayWidth}px;
+                height: ${overlayHeight}px;
+                opacity: ${this.overlayOpacity};
+            `;
+
+            const img = document.createElement('img');
+            img.src = this.phoneImage.src;
+            this.imageOverlay.appendChild(img);
+
+            this.overlay.appendChild(this.imageOverlay);
+            this.overlayVisible = true;
+            this.updateToggleButton();
+        }
+
+        updateOverlayPosition() {
+            // Recalculate overlay position when view changes
+            if (this.imageOverlay && this.lastHomography) {
+                // For now, just hide overlay when view changes significantly
+                // Full implementation would re-render based on new view
+            }
+        }
+
+        updateOverlayOpacity() {
+            if (this.imageOverlay) {
+                this.imageOverlay.style.opacity = this.overlayOpacity;
+            }
+        }
+
+        toggleOverlay() {
+            this.overlayVisible = !this.overlayVisible;
+            if (this.imageOverlay) {
+                this.imageOverlay.style.display = this.overlayVisible ? 'block' : 'none';
+            }
+            this.updateToggleButton();
+        }
+
+        updateToggleButton() {
+            const btn = this.panel.querySelector('.pf-toggle-overlay-btn');
+            if (this.overlayVisible) {
+                btn.innerHTML = `${ICONS.eyeOff} Hide Overlay`;
+                btn.className = 'pf-btn pf-btn-warning pf-toggle-overlay-btn';
+            } else {
+                btn.innerHTML = `${ICONS.eye} Show Overlay`;
+                btn.className = 'pf-btn pf-btn-success pf-toggle-overlay-btn';
+            }
+        }
+
+        addMapMarker() {
+            // Find the map element (ArcGIS or other)
+            const mapContainer = document.querySelector('geocam-map') ||
+                                document.querySelector('.esri-view-root') ||
+                                document.querySelector('[class*="map"]') ||
+                                document.querySelector('#map');
+
+            if (!mapContainer) {
+                this.showStatus('Map not found on page', 'error');
+                return;
+            }
+
+            // Remove existing marker
+            if (this.mapMarker) {
+                this.mapMarker.remove();
+            }
+
+            // Get current shot position from URL or map center
+            const params = new URLSearchParams(window.location.hash.substring(1));
+            let center = params.get('center');
+
+            // Try to get map center coordinates
+            const mapRect = mapContainer.getBoundingClientRect();
+            const centerX = mapRect.left + mapRect.width / 2;
+            const centerY = mapRect.top + mapRect.height / 2;
+
+            // Create marker container with pulse effect
+            const markerContainer = document.createElement('div');
+            markerContainer.style.cssText = `
+                position: fixed;
+                left: ${centerX}px;
+                top: ${centerY}px;
+                z-index: 10001;
+                pointer-events: auto;
+            `;
+
+            // Add pulse effect
+            const pulse = document.createElement('div');
+            pulse.className = 'pf-map-marker-pulse';
+            markerContainer.appendChild(pulse);
+
+            // Add marker icon
+            const marker = document.createElement('div');
+            marker.className = 'pf-map-marker';
+            marker.innerHTML = ICONS.phoneMarker;
+            marker.title = `Phone photo location\nFacing: ${this.lastResult?.facing.toFixed(1)}°\nHorizon: ${this.lastResult?.horizon.toFixed(1)}°`;
+
+            marker.addEventListener('click', () => {
+                this.navigateToResult();
+            });
+
+            markerContainer.appendChild(marker);
+
+            document.body.appendChild(markerContainer);
+            this.mapMarker = markerContainer;
+
+            this.showStatus('Phone marker added to map!', 'success');
+        }
+
+        showResults(result) {
+            const content = this.panel.querySelector('.pf-results-content');
             content.innerHTML = `
                 <div class="pf-result-item">
-                    <span class="label">Facing (Azimuth)</span>
-                    <span class="value">${result.facing.toFixed(1)}&deg;</span>
+                    <span class="label">Facing</span>
+                    <span class="value">${result.facing.toFixed(1)}°</span>
                 </div>
                 <div class="pf-result-item">
-                    <span class="label">Horizon (Tilt)</span>
-                    <span class="value">${result.horizon.toFixed(1)}&deg;</span>
+                    <span class="label">Horizon</span>
+                    <span class="value">${result.horizon.toFixed(1)}°</span>
                 </div>
                 <div class="pf-result-item">
-                    <span class="label">Est. FOV</span>
-                    <span class="value">${result.fov.toFixed(1)}&deg;</span>
+                    <span class="label">FOV</span>
+                    <span class="value">${result.fov.toFixed(1)}°</span>
                 </div>
                 <div class="pf-result-item">
-                    <span class="label">Feature Matches</span>
+                    <span class="label">Matches</span>
                     <span class="value">${result.matches}</span>
                 </div>
                 <div class="pf-result-item">
-                    <span class="label">RANSAC Inliers</span>
+                    <span class="label">Inliers</span>
                     <span class="value">${result.inliers} (${(result.confidence * 100).toFixed(0)}%)</span>
                 </div>
             `;
-
-            results.classList.add('visible');
-            navigateBtn.style.display = 'block';
+            this.panel.querySelector('.pf-results').classList.add('visible');
+            this.panel.querySelector('.pf-navigate-btn').style.display = 'block';
         }
 
         navigateToResult() {
             if (!this.lastResult) return;
-
             const params = new URLSearchParams(window.location.hash.substring(1));
             params.set('facing', this.lastResult.facing.toFixed(2));
             params.set('horizon', this.lastResult.horizon.toFixed(2));
             window.location.hash = params.toString();
-
-            this.showStatus('Navigated to matched position', 'success');
-        }
-
-        clearOverlay() {
-            this.overlay.innerHTML = '';
+            this.showStatus('Navigated to position', 'success');
         }
 
         delay(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-        }
-
-        destroy() {
-            if (this.button) this.button.remove();
-            if (this.panel) this.panel.remove();
-            if (this.overlay) this.overlay.remove();
+            return new Promise(r => setTimeout(r, ms));
         }
     }
 
     // ============================================
     // INITIALIZE
     // ============================================
-    const initWhenReady = () => {
+    setTimeout(() => {
         if (document.readyState === 'complete') {
             window.phoneFisheyeLocalization = new PhoneFisheyeLocalization();
         } else {
@@ -1365,8 +1415,6 @@
                 window.phoneFisheyeLocalization = new PhoneFisheyeLocalization();
             });
         }
-    };
-
-    setTimeout(initWhenReady, 500);
+    }, 500);
 
 })();
