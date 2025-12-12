@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      3.0.0
-// @description  Localize phone photos within GeoCam panorama views with image overlay and map marker
+// @version      4.0.0
+// @description  Localize phone photos within GeoCam panorama views with MatchAnything-style visualization and ArcGIS map marker
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -435,6 +435,42 @@
             text-align: center;
         }
 
+        /* MatchAnything-style visualization */
+        .pf-keypoint-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 9998;
+        }
+
+        .pf-match-stats {
+            position: fixed;
+            top: 70px;
+            left: 16px;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: monospace;
+            z-index: 10002;
+            display: none;
+        }
+
+        .pf-match-stats.visible {
+            display: block;
+        }
+
+        .pf-match-stats .match-count {
+            color: #4caf50;
+            font-weight: bold;
+        }
+
+        .pf-match-stats .inlier-count {
+            color: #ff9800;
+        }
+
         .pf-help {
             font-size: 11px;
             color: #888;
@@ -816,6 +852,58 @@
             matchVector.delete();
         }
 
+        // Extract matched keypoint coordinates for custom visualization
+        getMatchedPoints(kp1, kp2, matches) {
+            const points = [];
+            for (const match of matches) {
+                const pt1 = kp1.get(match.queryIdx).pt;
+                const pt2 = kp2.get(match.trainIdx).pt;
+                points.push({
+                    phone: { x: pt1.x, y: pt1.y },
+                    pano: { x: pt2.x, y: pt2.y },
+                    distance: match.distance
+                });
+            }
+            return points;
+        }
+
+        // Get inlier mask from RANSAC
+        computeHomographyWithMask(kp1, kp2, matches) {
+            if (matches.length < 4) return null;
+
+            const srcPoints = [], dstPoints = [];
+            for (const match of matches) {
+                const pt1 = kp1.get(match.queryIdx).pt;
+                const pt2 = kp2.get(match.trainIdx).pt;
+                srcPoints.push(pt1.x, pt1.y);
+                dstPoints.push(pt2.x, pt2.y);
+            }
+
+            const srcMat = cv.matFromArray(matches.length, 1, cv.CV_32FC2, srcPoints);
+            const dstMat = cv.matFromArray(matches.length, 1, cv.CV_32FC2, dstPoints);
+            const mask = new cv.Mat();
+            const H = cv.findHomography(srcMat, dstMat, cv.RANSAC, 5.0, mask);
+
+            // Extract inlier indices
+            const inlierIndices = [];
+            for (let i = 0; i < mask.rows; i++) {
+                if (mask.data[i] > 0) {
+                    inlierIndices.push(i);
+                }
+            }
+
+            srcMat.delete();
+            dstMat.delete();
+
+            return {
+                homography: H,
+                inlierIndices,
+                inliers: inlierIndices.length,
+                total: matches.length,
+                mask
+            };
+        }
+
         cleanup(mats) {
             mats.forEach(m => { if (m && m.delete) m.delete(); });
         }
@@ -842,6 +930,22 @@
             this.overlayOpacity = 0.7;
             this.overlayVisible = true;
 
+            // New: MatchAnything-style visualization
+            this.keypointCanvas = null;
+            this.matchedPoints = null;
+            this.inlierIndices = null;
+            this.matchStatsEl = null;
+            this.showKeypoints = true;
+
+            // New: ArcGIS integration
+            this.arcgisGraphicsLayer = null;
+            this.arcgisMapView = null;
+            this.shotCoordinates = null;
+
+            // View tracking for dynamic overlay
+            this.panoCanvas = null;
+            this.viewObserver = null;
+
             this.init();
         }
 
@@ -857,6 +961,8 @@
             this.createButton();
             this.createPanel();
             this.createOverlay();
+            this.createKeypointCanvas();
+            this.createMatchStats();
 
             this.updateCvStatus('loading', 'Loading OpenCV.js...');
             const cvLoaded = await this.matcher.init();
@@ -865,10 +971,101 @@
                 cvLoaded ? 'OpenCV ready' : 'OpenCV failed to load'
             );
 
-            // Listen for view changes to update overlay position
-            window.addEventListener('hashchange', () => this.updateOverlayPosition());
+            // Listen for view changes to update overlay and keypoints
+            window.addEventListener('hashchange', () => this.onViewChange());
+            window.addEventListener('resize', () => this.onViewChange());
 
-            console.log('[PhoneFisheye] Initialized v3.0');
+            // Set up canvas mutation observer for view changes
+            this.setupViewObserver();
+
+            // Try to get shot coordinates from URL
+            this.fetchShotCoordinates();
+
+            console.log('[PhoneFisheye] Initialized v4.0');
+        }
+
+        createKeypointCanvas() {
+            this.keypointCanvas = document.createElement('canvas');
+            this.keypointCanvas.className = 'pf-keypoint-canvas';
+            this.keypointCanvas.style.display = 'none';
+            document.body.appendChild(this.keypointCanvas);
+        }
+
+        createMatchStats() {
+            this.matchStatsEl = document.createElement('div');
+            this.matchStatsEl.className = 'pf-match-stats';
+            this.matchStatsEl.innerHTML = `
+                Matches: <span class="match-count">0</span> |
+                Inliers: <span class="inlier-count">0</span>
+            `;
+            document.body.appendChild(this.matchStatsEl);
+        }
+
+        setupViewObserver() {
+            // Watch for canvas redraws (indicates view change)
+            const checkCanvas = () => {
+                const canvas = document.querySelector('canvas');
+                if (canvas && canvas !== this.panoCanvas) {
+                    this.panoCanvas = canvas;
+
+                    // Listen for mouse events that indicate view interaction
+                    canvas.addEventListener('mouseup', () => {
+                        setTimeout(() => this.onViewChange(), 100);
+                    });
+                    canvas.addEventListener('wheel', () => {
+                        setTimeout(() => this.onViewChange(), 100);
+                    });
+                }
+            };
+
+            // Check periodically for canvas
+            checkCanvas();
+            setInterval(checkCanvas, 2000);
+        }
+
+        async fetchShotCoordinates() {
+            const params = new URLSearchParams(window.location.hash.substring(1));
+            const shotId = params.get('shot');
+
+            if (!shotId) return;
+
+            // Try to get coordinates from the feature service
+            try {
+                // Get cell ID from URL
+                const urlMatch = window.location.pathname.match(/cell\+([^\/]+)/);
+                if (!urlMatch) return;
+
+                const cellId = urlMatch[1];
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${cellId}/FeatureServer/0/query`;
+                const queryParams = new URLSearchParams({
+                    f: 'json',
+                    where: `id=${shotId}`,
+                    outFields: '*',
+                    returnGeometry: 'true',
+                    returnZ: 'true'
+                });
+
+                const response = await fetch(`${featureUrl}?${queryParams}`);
+                const data = await response.json();
+
+                if (data.features && data.features.length > 0) {
+                    const feature = data.features[0];
+                    this.shotCoordinates = {
+                        x: feature.geometry.x,
+                        y: feature.geometry.y,
+                        z: feature.geometry.z || 0,
+                        heading: feature.attributes.heading
+                    };
+                    console.log('[PhoneFisheye] Shot coordinates:', this.shotCoordinates);
+                }
+            } catch (err) {
+                console.warn('[PhoneFisheye] Could not fetch shot coordinates:', err);
+            }
+        }
+
+        onViewChange() {
+            this.updateOverlayPosition();
+            this.updateKeypointVisualization();
         }
 
         createButton() {
@@ -1065,6 +1262,8 @@
             this.phoneImage = null;
             this.lastResult = null;
             this.lastHomography = null;
+            this.matchedPoints = null;
+            this.inlierIndices = null;
 
             // Remove overlay image
             if (this.imageOverlay) {
@@ -1072,10 +1271,32 @@
                 this.imageOverlay = null;
             }
 
-            // Remove map marker
+            // Remove map marker (DOM fallback)
             if (this.mapMarker) {
                 this.mapMarker.remove();
                 this.mapMarker = null;
+            }
+
+            // Remove ArcGIS graphics layer
+            if (this.arcgisGraphicsLayer && this.arcgisMapView) {
+                try {
+                    this.arcgisMapView.map.remove(this.arcgisGraphicsLayer);
+                } catch (e) {
+                    console.warn('[PhoneFisheye] Could not remove ArcGIS layer:', e);
+                }
+                this.arcgisGraphicsLayer = null;
+            }
+
+            // Hide keypoint visualization
+            if (this.keypointCanvas) {
+                this.keypointCanvas.style.display = 'none';
+                const ctx = this.keypointCanvas.getContext('2d');
+                ctx.clearRect(0, 0, this.keypointCanvas.width, this.keypointCanvas.height);
+            }
+
+            // Hide match stats
+            if (this.matchStatsEl) {
+                this.matchStatsEl.classList.remove('visible');
             }
 
             this.panel.querySelector('.pf-preview').classList.remove('visible');
@@ -1160,7 +1381,8 @@
                 this.showStatus('Computing homography...', 'loading');
                 await this.delay(50);
 
-                const homResult = this.matcher.computeHomography(
+                // Use new method that returns inlier indices for visualization
+                const homResult = this.matcher.computeHomographyWithMask(
                     phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
                 );
 
@@ -1168,11 +1390,20 @@
                     throw new Error('Could not compute homography');
                 }
 
+                // Store matched points for MatchAnything-style visualization
+                this.matchedPoints = this.matcher.getMatchedPoints(
+                    phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
+                );
+                this.inlierIndices = new Set(homResult.inlierIndices);
+
                 this.lastHomography = {
                     H: homResult.homography,
                     phoneW, phoneH, panoW, panoH,
                     panoCanvas
                 };
+
+                // Clean up mask
+                if (homResult.mask) homResult.mask.delete();
 
                 this.showProgress(85);
                 this.showStatus('Estimating pose...', 'loading');
@@ -1195,13 +1426,19 @@
                     confidence: homResult.inliers / homResult.total
                 };
 
-                // Draw match visualization
+                // Draw match visualization (OpenCV style - in panel)
                 this.matcher.drawMatches(phoneMat, phoneFeatures.keypoints,
                     panoMat, panoFeatures.keypoints, goodMatches, this.matchCanvas);
                 this.panel.querySelector('.pf-match-preview').classList.add('visible');
 
                 // Create image overlay on panorama
                 this.createImageOverlay();
+
+                // Draw MatchAnything-style keypoint visualization on pano
+                this.drawKeypointVisualization();
+
+                // Update match stats display
+                this.updateMatchStats(goodMatches.length, homResult.inliers);
 
                 // Show results and controls
                 this.showResults(this.lastResult);
@@ -1236,19 +1473,25 @@
             }
 
             const { H, phoneW, phoneH, panoW, panoH, panoCanvas } = this.lastHomography;
+
+            // Store original bounds in normalized coordinates (0-1)
             const bounds = this.matcher.warpImageBounds(H, phoneW, phoneH, panoW, panoH);
+            this.lastHomography.normalizedBounds = {
+                minX: bounds.minX / panoW,
+                maxX: bounds.maxX / panoW,
+                minY: bounds.minY / panoH,
+                maxY: bounds.maxY / panoH,
+                corners: bounds.corners.map(c => ({ x: c.x / panoW, y: c.y / panoH }))
+            };
 
             // Get canvas position on screen
             const canvasRect = panoCanvas.getBoundingClientRect();
 
             // Scale bounds to screen coordinates
-            const scaleX = canvasRect.width / panoW;
-            const scaleY = canvasRect.height / panoH;
-
-            const overlayLeft = canvasRect.left + bounds.minX * scaleX;
-            const overlayTop = canvasRect.top + bounds.minY * scaleY;
-            const overlayWidth = (bounds.maxX - bounds.minX) * scaleX;
-            const overlayHeight = (bounds.maxY - bounds.minY) * scaleY;
+            const overlayLeft = canvasRect.left + bounds.minX * (canvasRect.width / panoW);
+            const overlayTop = canvasRect.top + bounds.minY * (canvasRect.height / panoH);
+            const overlayWidth = (bounds.maxX - bounds.minX) * (canvasRect.width / panoW);
+            const overlayHeight = (bounds.maxY - bounds.minY) * (canvasRect.height / panoH);
 
             // Create overlay element
             this.imageOverlay = document.createElement('div');
@@ -1272,9 +1515,110 @@
 
         updateOverlayPosition() {
             // Recalculate overlay position when view changes
-            if (this.imageOverlay && this.lastHomography) {
-                // For now, just hide overlay when view changes significantly
-                // Full implementation would re-render based on new view
+            if (!this.imageOverlay || !this.lastHomography || !this.lastHomography.normalizedBounds) return;
+
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return;
+
+            const canvasRect = canvas.getBoundingClientRect();
+            const bounds = this.lastHomography.normalizedBounds;
+
+            // Recalculate position from normalized bounds
+            const overlayLeft = canvasRect.left + bounds.minX * canvasRect.width;
+            const overlayTop = canvasRect.top + bounds.minY * canvasRect.height;
+            const overlayWidth = (bounds.maxX - bounds.minX) * canvasRect.width;
+            const overlayHeight = (bounds.maxY - bounds.minY) * canvasRect.height;
+
+            this.imageOverlay.style.left = `${overlayLeft}px`;
+            this.imageOverlay.style.top = `${overlayTop}px`;
+            this.imageOverlay.style.width = `${overlayWidth}px`;
+            this.imageOverlay.style.height = `${overlayHeight}px`;
+        }
+
+        drawKeypointVisualization() {
+            if (!this.matchedPoints || !this.lastHomography) return;
+
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return;
+
+            const canvasRect = canvas.getBoundingClientRect();
+            const { panoW, panoH } = this.lastHomography;
+
+            // Size and position the keypoint canvas to match the panorama canvas
+            this.keypointCanvas.width = canvasRect.width;
+            this.keypointCanvas.height = canvasRect.height;
+            this.keypointCanvas.style.left = `${canvasRect.left}px`;
+            this.keypointCanvas.style.top = `${canvasRect.top}px`;
+            this.keypointCanvas.style.width = `${canvasRect.width}px`;
+            this.keypointCanvas.style.height = `${canvasRect.height}px`;
+            this.keypointCanvas.style.display = this.showKeypoints ? 'block' : 'none';
+
+            const ctx = this.keypointCanvas.getContext('2d');
+            ctx.clearRect(0, 0, this.keypointCanvas.width, this.keypointCanvas.height);
+
+            const scaleX = canvasRect.width / panoW;
+            const scaleY = canvasRect.height / panoH;
+
+            // Draw keypoints as colored dots (like MatchAnything)
+            this.matchedPoints.forEach((point, idx) => {
+                const isInlier = this.inlierIndices && this.inlierIndices.has(idx);
+                const screenX = point.pano.x * scaleX;
+                const screenY = point.pano.y * scaleY;
+
+                // Generate color based on match quality
+                const hue = isInlier ? 120 : 0; // Green for inliers, red for outliers
+                const saturation = 80;
+                const lightness = 50;
+
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, isInlier ? 4 : 3, 0, Math.PI * 2);
+                ctx.fillStyle = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+                ctx.fill();
+
+                // Draw outline for inliers
+                if (isInlier) {
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            });
+
+            // Draw connecting lines for a subset of matches (to not clutter)
+            const maxLines = Math.min(50, this.matchedPoints.length);
+            const step = Math.ceil(this.matchedPoints.length / maxLines);
+
+            ctx.globalAlpha = 0.3;
+            for (let i = 0; i < this.matchedPoints.length; i += step) {
+                const point = this.matchedPoints[i];
+                const isInlier = this.inlierIndices && this.inlierIndices.has(i);
+
+                if (!isInlier) continue; // Only draw lines for inliers
+
+                const screenX = point.pano.x * scaleX;
+                const screenY = point.pano.y * scaleY;
+
+                // Draw a short line indicating match direction
+                ctx.beginPath();
+                ctx.moveTo(screenX, screenY);
+                ctx.lineTo(screenX + 10, screenY - 10);
+                ctx.strokeStyle = '#4caf50';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        updateKeypointVisualization() {
+            if (this.showKeypoints && this.matchedPoints) {
+                this.drawKeypointVisualization();
+            }
+        }
+
+        updateMatchStats(totalMatches, inliers) {
+            if (this.matchStatsEl) {
+                this.matchStatsEl.querySelector('.match-count').textContent = totalMatches;
+                this.matchStatsEl.querySelector('.inlier-count').textContent = inliers;
+                this.matchStatsEl.classList.add('visible');
             }
         }
 
@@ -1303,8 +1647,169 @@
             }
         }
 
-        addMapMarker() {
-            // Find the map element (ArcGIS or other)
+        async addMapMarker() {
+            // Try to find the ArcGIS MapView through various methods
+            let mapView = null;
+
+            // Method 1: Check for exposed mapView on geocam-map element
+            const geocamMap = document.querySelector('geocam-map');
+            if (geocamMap && geocamMap.view) {
+                mapView = geocamMap.view;
+            }
+
+            // Method 2: Check window for exposed view
+            if (!mapView && window.mapView) {
+                mapView = window.mapView;
+            }
+
+            // Method 3: Look for Esri MapView through require (AMD)
+            if (!mapView && typeof require !== 'undefined') {
+                try {
+                    const [MapView, GraphicsLayer, Graphic, Point, SimpleMarkerSymbol, PictureMarkerSymbol] = await new Promise((resolve, reject) => {
+                        require([
+                            'esri/views/MapView',
+                            'esri/layers/GraphicsLayer',
+                            'esri/Graphic',
+                            'esri/geometry/Point',
+                            'esri/symbols/SimpleMarkerSymbol',
+                            'esri/symbols/PictureMarkerSymbol'
+                        ], (...modules) => resolve(modules), reject);
+                    });
+
+                    // Find the map view from DOM
+                    const viewContainer = document.querySelector('.esri-view');
+                    if (viewContainer && viewContainer.__view) {
+                        mapView = viewContainer.__view;
+                    }
+                } catch (e) {
+                    console.warn('[PhoneFisheye] Could not load ArcGIS modules:', e);
+                }
+            }
+
+            // If no shot coordinates, try to get them
+            if (!this.shotCoordinates) {
+                await this.fetchShotCoordinates();
+            }
+
+            // Fallback: If no ArcGIS view found, use the shot coordinates to create a DOM marker
+            // that follows the map
+            if (!mapView) {
+                this.addFallbackMapMarker();
+                return;
+            }
+
+            // Use ArcGIS API to add proper graphic layer
+            try {
+                await this.addArcGISMarker(mapView);
+            } catch (e) {
+                console.error('[PhoneFisheye] ArcGIS marker error:', e);
+                this.addFallbackMapMarker();
+            }
+        }
+
+        async addArcGISMarker(mapView) {
+            if (!this.shotCoordinates) {
+                this.showStatus('Shot coordinates not available', 'error');
+                return;
+            }
+
+            // Load ArcGIS modules
+            const [GraphicsLayer, Graphic, Point, SimpleMarkerSymbol] = await new Promise((resolve, reject) => {
+                require([
+                    'esri/layers/GraphicsLayer',
+                    'esri/Graphic',
+                    'esri/geometry/Point',
+                    'esri/symbols/SimpleMarkerSymbol'
+                ], (...modules) => resolve(modules), reject);
+            });
+
+            // Remove existing layer if present
+            if (this.arcgisGraphicsLayer) {
+                mapView.map.remove(this.arcgisGraphicsLayer);
+            }
+
+            // Create a new graphics layer for the phone marker
+            this.arcgisGraphicsLayer = new GraphicsLayer({
+                id: 'phone-fisheye-marker',
+                title: 'Phone Photo Location'
+            });
+
+            // Create the point at shot coordinates
+            const point = new Point({
+                longitude: this.shotCoordinates.x,
+                latitude: this.shotCoordinates.y,
+                spatialReference: { wkid: 4326 }
+            });
+
+            // Create a distinctive phone marker symbol
+            const symbol = {
+                type: 'simple-marker',
+                style: 'circle',
+                color: [255, 87, 34, 0.8], // Orange
+                size: 16,
+                outline: {
+                    color: [255, 255, 255],
+                    width: 3
+                }
+            };
+
+            // Create an outer ring for emphasis
+            const outerSymbol = {
+                type: 'simple-marker',
+                style: 'circle',
+                color: [255, 87, 34, 0.2],
+                size: 32,
+                outline: {
+                    color: [255, 87, 34, 0.5],
+                    width: 2
+                }
+            };
+
+            // Create graphics
+            const outerGraphic = new Graphic({
+                geometry: point,
+                symbol: outerSymbol,
+                attributes: {
+                    type: 'phone-location-outer',
+                    facing: this.lastResult?.facing,
+                    horizon: this.lastResult?.horizon
+                }
+            });
+
+            const graphic = new Graphic({
+                geometry: point,
+                symbol: symbol,
+                attributes: {
+                    type: 'phone-location',
+                    facing: this.lastResult?.facing,
+                    horizon: this.lastResult?.horizon
+                },
+                popupTemplate: {
+                    title: 'Phone Photo Location',
+                    content: `
+                        <p><strong>Coordinates:</strong> ${this.shotCoordinates.y.toFixed(6)}, ${this.shotCoordinates.x.toFixed(6)}</p>
+                        <p><strong>Facing:</strong> ${this.lastResult?.facing.toFixed(1)}°</p>
+                        <p><strong>Horizon:</strong> ${this.lastResult?.horizon.toFixed(1)}°</p>
+                        <p><strong>FOV:</strong> ${this.lastResult?.fov.toFixed(1)}°</p>
+                        <p><strong>Matches:</strong> ${this.lastResult?.matches} (${this.lastResult?.inliers} inliers)</p>
+                    `
+                }
+            });
+
+            // Add graphics to layer
+            this.arcgisGraphicsLayer.addMany([outerGraphic, graphic]);
+
+            // Add layer to map
+            mapView.map.add(this.arcgisGraphicsLayer);
+
+            this.arcgisMapView = mapView;
+            this.showStatus('Phone marker added to map at geographic coordinates!', 'success');
+
+            console.log('[PhoneFisheye] Added ArcGIS marker at:', this.shotCoordinates);
+        }
+
+        addFallbackMapMarker() {
+            // Fallback: Create a DOM-based marker that tries to follow the map
             const mapContainer = document.querySelector('geocam-map') ||
                                 document.querySelector('.esri-view-root') ||
                                 document.querySelector('[class*="map"]') ||
@@ -1320,11 +1825,7 @@
                 this.mapMarker.remove();
             }
 
-            // Get current shot position from URL or map center
-            const params = new URLSearchParams(window.location.hash.substring(1));
-            let center = params.get('center');
-
-            // Try to get map center coordinates
+            // Get map center as fallback position
             const mapRect = mapContainer.getBoundingClientRect();
             const centerX = mapRect.left + mapRect.width / 2;
             const centerY = mapRect.top + mapRect.height / 2;
@@ -1348,7 +1849,7 @@
             const marker = document.createElement('div');
             marker.className = 'pf-map-marker';
             marker.innerHTML = ICONS.phoneMarker;
-            marker.title = `Phone photo location\nFacing: ${this.lastResult?.facing.toFixed(1)}°\nHorizon: ${this.lastResult?.horizon.toFixed(1)}°`;
+            marker.title = `Phone photo location\nFacing: ${this.lastResult?.facing.toFixed(1)}°\nHorizon: ${this.lastResult?.horizon.toFixed(1)}°\n\nNote: Using fallback marker (ArcGIS not detected)`;
 
             marker.addEventListener('click', () => {
                 this.navigateToResult();
@@ -1359,7 +1860,7 @@
             document.body.appendChild(markerContainer);
             this.mapMarker = markerContainer;
 
-            this.showStatus('Phone marker added to map!', 'success');
+            this.showStatus('Phone marker added (fallback mode - zoom may not work properly)', 'info');
         }
 
         showResults(result) {
