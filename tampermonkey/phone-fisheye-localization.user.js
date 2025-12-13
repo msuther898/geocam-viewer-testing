@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.0.0
-// @description  CLIP vision model for semantic similarity + ORB geometric verification
+// @version      8.1.0
+// @description  CLIP semantic search with IndexedDB embedding cache
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -1123,6 +1123,200 @@
     }
 
     // ============================================
+    // EMBEDDING CACHE - IndexedDB storage for CLIP embeddings
+    // ============================================
+    class EmbeddingCache {
+        constructor() {
+            this.dbName = 'GeoCamEmbeddingCache';
+            this.dbVersion = 1;
+            this.storeName = 'embeddings';
+            this.db = null;
+        }
+
+        async open() {
+            if (this.db) return this.db;
+
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(this.dbName, this.dbVersion);
+
+                request.onerror = () => {
+                    console.error('[EmbeddingCache] Failed to open database');
+                    reject(request.error);
+                };
+
+                request.onsuccess = () => {
+                    this.db = request.result;
+                    console.log('[EmbeddingCache] Database opened');
+                    resolve(this.db);
+                };
+
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+
+                    // Create embeddings store with indexes
+                    if (!db.objectStoreNames.contains(this.storeName)) {
+                        const store = db.createObjectStore(this.storeName, { keyPath: 'key' });
+                        store.createIndex('cellId', 'cellId', { unique: false });
+                        store.createIndex('shotId', 'shotId', { unique: false });
+                        store.createIndex('timestamp', 'timestamp', { unique: false });
+                        console.log('[EmbeddingCache] Object store created');
+                    }
+                };
+            });
+        }
+
+        // Generate cache key: cellId_shotId_fov (fov rounded to nearest 10)
+        makeKey(cellId, shotId, fov = 80) {
+            const roundedFov = Math.round(fov / 10) * 10;
+            return `${cellId}_${shotId}_${roundedFov}`;
+        }
+
+        async get(cellId, shotId, fov = 80) {
+            await this.open();
+            const key = this.makeKey(cellId, shotId, fov);
+
+            return new Promise((resolve, reject) => {
+                const transaction = this.db.transaction([this.storeName], 'readonly');
+                const store = transaction.objectStore(this.storeName);
+                const request = store.get(key);
+
+                request.onsuccess = () => {
+                    if (request.result) {
+                        // Return the embedding array
+                        resolve(request.result.embedding);
+                    } else {
+                        resolve(null);
+                    }
+                };
+
+                request.onerror = () => {
+                    console.warn('[EmbeddingCache] Get error:', request.error);
+                    resolve(null);
+                };
+            });
+        }
+
+        async set(cellId, shotId, fov, embedding) {
+            await this.open();
+            const key = this.makeKey(cellId, shotId, fov);
+
+            return new Promise((resolve, reject) => {
+                const transaction = this.db.transaction([this.storeName], 'readwrite');
+                const store = transaction.objectStore(this.storeName);
+
+                const record = {
+                    key,
+                    cellId,
+                    shotId,
+                    fov: Math.round(fov / 10) * 10,
+                    embedding,
+                    timestamp: Date.now()
+                };
+
+                const request = store.put(record);
+
+                request.onsuccess = () => resolve(true);
+                request.onerror = () => {
+                    console.warn('[EmbeddingCache] Set error:', request.error);
+                    resolve(false);
+                };
+            });
+        }
+
+        // Get multiple embeddings at once
+        async getMany(cellId, shotIds, fov = 80) {
+            await this.open();
+            const results = new Map();
+
+            return new Promise((resolve) => {
+                const transaction = this.db.transaction([this.storeName], 'readonly');
+                const store = transaction.objectStore(this.storeName);
+                let pending = shotIds.length;
+
+                if (pending === 0) {
+                    resolve(results);
+                    return;
+                }
+
+                for (const shotId of shotIds) {
+                    const key = this.makeKey(cellId, shotId, fov);
+                    const request = store.get(key);
+
+                    request.onsuccess = () => {
+                        if (request.result) {
+                            results.set(shotId, request.result.embedding);
+                        }
+                        pending--;
+                        if (pending === 0) resolve(results);
+                    };
+
+                    request.onerror = () => {
+                        pending--;
+                        if (pending === 0) resolve(results);
+                    };
+                }
+            });
+        }
+
+        // Get cache stats for a cell
+        async getStats(cellId) {
+            await this.open();
+
+            return new Promise((resolve) => {
+                const transaction = this.db.transaction([this.storeName], 'readonly');
+                const store = transaction.objectStore(this.storeName);
+                const index = store.index('cellId');
+                const request = index.count(IDBKeyRange.only(cellId));
+
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => resolve(0);
+            });
+        }
+
+        // Clear cache for a specific cell
+        async clearCell(cellId) {
+            await this.open();
+
+            return new Promise((resolve) => {
+                const transaction = this.db.transaction([this.storeName], 'readwrite');
+                const store = transaction.objectStore(this.storeName);
+                const index = store.index('cellId');
+                const request = index.openCursor(IDBKeyRange.only(cellId));
+
+                request.onsuccess = (event) => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        store.delete(cursor.primaryKey);
+                        cursor.continue();
+                    } else {
+                        console.log(`[EmbeddingCache] Cleared cache for cell ${cellId}`);
+                        resolve(true);
+                    }
+                };
+
+                request.onerror = () => resolve(false);
+            });
+        }
+
+        // Clear all cached embeddings
+        async clearAll() {
+            await this.open();
+
+            return new Promise((resolve) => {
+                const transaction = this.db.transaction([this.storeName], 'readwrite');
+                const store = transaction.objectStore(this.storeName);
+                const request = store.clear();
+
+                request.onsuccess = () => {
+                    console.log('[EmbeddingCache] All cache cleared');
+                    resolve(true);
+                };
+                request.onerror = () => resolve(false);
+            });
+        }
+    }
+
+    // ============================================
     // VISION EMBEDDER - CLIP-based semantic similarity
     // ============================================
     class VisionEmbedder {
@@ -1132,6 +1326,7 @@
             this.processor = null;
             this.model = null;
             this.transformers = null;
+            this.cache = new EmbeddingCache(); // Add embedding cache
             this.modelName = 'Xenova/clip-vit-base-patch32'; // Good balance of speed/quality
         }
 
@@ -1940,8 +2135,13 @@
                 </button>
 
                 <button class="pf-btn pf-btn-secondary pf-batch-search-btn" disabled style="background: #9c27b0;">
-                    ${ICONS.search} Search ALL Shots (slow)
+                    ${ICONS.search} Search ALL Shots
                 </button>
+
+                <div class="pf-cache-status" style="font-size: 10px; color: #666; margin: 4px 0; display: flex; justify-content: space-between; align-items: center;">
+                    <span class="pf-cache-count">📦 Cache: loading...</span>
+                    <button class="pf-clear-cache-btn" style="font-size: 9px; padding: 2px 6px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 3px; cursor: pointer;">Clear Cache</button>
+                </div>
 
                 <div class="pf-batch-results" style="display:none; margin-top: 12px; max-height: 200px; overflow-y: auto;">
                     <h5 style="margin: 0 0 8px 0; font-size: 12px;">Best Matches:</h5>
@@ -2041,6 +2241,22 @@
             this.panel.querySelector('.pf-localize-btn').addEventListener('click', () => this.startLocalization());
             this.panel.querySelector('.pf-batch-search-btn').addEventListener('click', () => this.startBatchSearch());
             this.panel.querySelector('.pf-navigate-btn').addEventListener('click', () => this.navigateToResult());
+
+            // Cache controls
+            this.panel.querySelector('.pf-clear-cache-btn').addEventListener('click', async () => {
+                if (confirm('Clear all cached CLIP embeddings for this cell?')) {
+                    if (this.cellId) {
+                        await this.embedder.cache.clearCell(this.cellId);
+                    } else {
+                        await this.embedder.cache.clearAll();
+                    }
+                    this.updateCacheStatus();
+                    this.showStatus('Cache cleared', 'info');
+                }
+            });
+
+            // Update cache status on load
+            this.updateCacheStatus();
             this.panel.querySelector('.pf-clear-btn').addEventListener('click', () => this.clearAll());
 
             this.panel.querySelector('.pf-fov').addEventListener('change', (e) => {
@@ -2235,6 +2451,28 @@
 
         hideProgress() {
             this.panel.querySelector('.pf-progress').classList.remove('visible');
+        }
+
+        async updateCacheStatus() {
+            try {
+                // Get cell ID if not already set
+                if (!this.cellId) {
+                    const urlMatch = window.location.href.match(/cell[+\s]([a-z0-9+]+)/i);
+                    if (urlMatch) {
+                        this.cellId = urlMatch[1];
+                    }
+                }
+
+                const cacheCountEl = this.panel.querySelector('.pf-cache-count');
+                if (this.cellId) {
+                    const count = await this.embedder.cache.getStats(this.cellId);
+                    cacheCountEl.textContent = `📦 Cache: ${count} embeddings`;
+                } else {
+                    cacheCountEl.textContent = `📦 Cache: (no cell)`;
+                }
+            } catch (e) {
+                console.warn('[PhoneFisheye] Cache status error:', e);
+            }
         }
 
         async startLocalization() {
@@ -2475,26 +2713,47 @@
                 const originalShot = originalParams.get('shot');
                 const originalFacing = originalParams.get('facing');
 
-                // STAGE 2: Compute CLIP similarity for all sampled shots
-                this.showStatus(`Computing similarity for ${sampledShots.length} shots...`, 'loading');
-                batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity (${sampledShots.length} shots)...</div>`;
+                // STAGE 2: Compute CLIP similarity (with caching)
+                const searchFov = 80;
+
+                // Check cache for existing embeddings
+                this.showStatus('Checking embedding cache...', 'loading');
+                const shotIds = sampledShots.map(s => s.id);
+                const cachedEmbeddings = await this.embedder.cache.getMany(this.cellId, shotIds, searchFov);
+                const cachedCount = cachedEmbeddings.size;
+
+                const uncachedShots = sampledShots.filter(s => !cachedEmbeddings.has(s.id));
+                console.log(`[BatchSearch] Cache: ${cachedCount} cached, ${uncachedShots.length} to compute`);
+
+                batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity<br/>📦 ${cachedCount} cached, 🔄 ${uncachedShots.length} to compute...</div>`;
 
                 const similarities = [];
 
-                for (let i = 0; i < sampledShots.length; i++) {
-                    const shot = sampledShots[i];
-                    const progress = 10 + (i / sampledShots.length) * 40;
+                // First, add cached embeddings to similarities
+                for (const shot of sampledShots) {
+                    const cachedEmbedding = cachedEmbeddings.get(shot.id);
+                    if (cachedEmbedding) {
+                        const similarity = this.embedder.cosineSimilarity(phoneEmbedding, cachedEmbedding);
+                        similarities.push({ ...shot, similarity, cached: true });
+                    }
+                }
+
+                // Compute embeddings for uncached shots
+                for (let i = 0; i < uncachedShots.length; i++) {
+                    const shot = uncachedShots[i];
+                    const progress = 10 + (i / uncachedShots.length) * 40;
                     this.showProgress(progress);
 
                     if (i % 10 === 0) {
-                        this.showStatus(`CLIP: ${i + 1}/${sampledShots.length} shots...`, 'loading');
+                        this.showStatus(`CLIP: ${i + 1}/${uncachedShots.length} (${cachedCount} cached)...`, 'loading');
+                        batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity<br/>📦 ${cachedCount} cached ✓<br/>🔄 Computing ${i + 1}/${uncachedShots.length}...</div>`;
                     }
 
                     try {
                         // Navigate to shot
                         const params = new URLSearchParams(window.location.hash.substring(1));
                         params.set('shot', shot.id);
-                        params.set('fov', '80'); // Medium-wide FOV
+                        params.set('fov', String(searchFov));
                         window.location.hash = params.toString();
 
                         // Wait for view to load
@@ -2504,17 +2763,21 @@
                         const panoCanvas = this.embedder.capturePanoCanvas();
                         if (panoCanvas) {
                             const panoEmbedding = await this.embedder.getEmbedding(panoCanvas);
-                            const similarity = this.embedder.cosineSimilarity(phoneEmbedding, panoEmbedding);
 
-                            similarities.push({
-                                ...shot,
-                                similarity
-                            });
+                            // Cache the embedding for future searches
+                            await this.embedder.cache.set(this.cellId, shot.id, searchFov, panoEmbedding);
+
+                            const similarity = this.embedder.cosineSimilarity(phoneEmbedding, panoEmbedding);
+                            similarities.push({ ...shot, similarity, cached: false });
                         }
                     } catch (e) {
                         console.warn(`[BatchSearch] CLIP error on shot ${shot.id}:`, e);
                     }
                 }
+
+                // Log cache stats
+                const newCacheCount = await this.embedder.cache.getStats(this.cellId);
+                console.log(`[BatchSearch] Cache now has ${newCacheCount} embeddings for this cell`);
 
                 // Sort by similarity and take top candidates
                 similarities.sort((a, b) => b.similarity - a.similarity);
@@ -2642,6 +2905,8 @@
                 this.showStatus(`Search failed: ${err.message}`, 'error');
             } finally {
                 this.isMatching = false;
+                // Update cache status after search
+                this.updateCacheStatus();
             }
         }
 
