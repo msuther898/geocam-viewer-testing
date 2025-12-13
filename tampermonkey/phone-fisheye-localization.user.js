@@ -1330,51 +1330,44 @@
             this.modelName = 'Xenova/clip-vit-base-patch32'; // Good balance of speed/quality
         }
 
-        // Dynamically load Transformers.js library
+        // Dynamically load Transformers.js library using ES module import
         async loadTransformersLibrary() {
             if (this.transformers) return this.transformers;
 
-            // Check if already loaded globally
-            if (window.Transformers) {
-                this.transformers = window.Transformers;
+            console.log('[VisionEmbedder] Loading Transformers.js via dynamic import...');
+
+            try {
+                // Use dynamic import() for ES modules
+                // This works in modern browsers even from non-module scripts
+                this.transformers = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
+
+                console.log('[VisionEmbedder] ✓ Transformers.js loaded via import()');
+                console.log('[VisionEmbedder] Exports:', Object.keys(this.transformers).slice(0, 15));
+
                 return this.transformers;
+            } catch (err) {
+                console.error('[VisionEmbedder] Dynamic import failed:', err.message);
+
+                // Fallback: try loading via blob URL workaround
+                console.log('[VisionEmbedder] Trying blob URL workaround...');
+                try {
+                    const response = await fetch('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js');
+                    const code = await response.text();
+
+                    // Create a blob URL and import as module
+                    const blob = new Blob([code], { type: 'application/javascript' });
+                    const blobUrl = URL.createObjectURL(blob);
+
+                    this.transformers = await import(blobUrl);
+                    URL.revokeObjectURL(blobUrl);
+
+                    console.log('[VisionEmbedder] ✓ Loaded via blob URL');
+                    return this.transformers;
+                } catch (err2) {
+                    console.error('[VisionEmbedder] Blob URL fallback failed:', err2.message);
+                    throw new Error('Failed to load Transformers.js: ' + err.message);
+                }
             }
-
-            console.log('[VisionEmbedder] Loading Transformers.js library...');
-
-            return new Promise((resolve, reject) => {
-                const script = document.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
-                script.onload = () => {
-                    // Log what's available globally
-                    console.log('[VisionEmbedder] Script loaded. Checking globals...');
-                    console.log('[VisionEmbedder] window.Transformers:', typeof window.Transformers);
-                    console.log('[VisionEmbedder] window.pipeline:', typeof window.pipeline);
-                    console.log('[VisionEmbedder] window.AutoProcessor:', typeof window.AutoProcessor);
-
-                    // Transformers.js may expose as different names
-                    const transformers = window.Transformers || window.transformers || {
-                        AutoProcessor: window.AutoProcessor,
-                        CLIPVisionModelWithProjection: window.CLIPVisionModelWithProjection,
-                        RawImage: window.RawImage,
-                        pipeline: window.pipeline
-                    };
-
-                    if (transformers && (transformers.AutoProcessor || transformers.pipeline)) {
-                        this.transformers = transformers;
-                        console.log('[VisionEmbedder] ✓ Transformers.js loaded:', Object.keys(transformers).slice(0, 10));
-                        resolve(this.transformers);
-                    } else {
-                        console.error('[VisionEmbedder] Transformers.js exports not found');
-                        reject(new Error('Transformers.js failed to initialize'));
-                    }
-                };
-                script.onerror = (e) => {
-                    console.error('[VisionEmbedder] Script load error:', e);
-                    reject(new Error('Failed to load Transformers.js'));
-                };
-                document.head.appendChild(script);
-            });
         }
 
         async initialize() {
