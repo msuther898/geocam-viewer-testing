@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.1.0
-// @description  CLIP semantic search with IndexedDB embedding cache
+// @version      8.2.0
+// @description  CLIP semantic search with debug logging and cache
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -1346,16 +1346,33 @@
                 const script = document.createElement('script');
                 script.src = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
                 script.onload = () => {
-                    // Transformers.js exposes itself as window.Transformers
-                    if (window.Transformers) {
-                        this.transformers = window.Transformers;
-                        console.log('[VisionEmbedder] Transformers.js loaded');
+                    // Log what's available globally
+                    console.log('[VisionEmbedder] Script loaded. Checking globals...');
+                    console.log('[VisionEmbedder] window.Transformers:', typeof window.Transformers);
+                    console.log('[VisionEmbedder] window.pipeline:', typeof window.pipeline);
+                    console.log('[VisionEmbedder] window.AutoProcessor:', typeof window.AutoProcessor);
+
+                    // Transformers.js may expose as different names
+                    const transformers = window.Transformers || window.transformers || {
+                        AutoProcessor: window.AutoProcessor,
+                        CLIPVisionModelWithProjection: window.CLIPVisionModelWithProjection,
+                        RawImage: window.RawImage,
+                        pipeline: window.pipeline
+                    };
+
+                    if (transformers && (transformers.AutoProcessor || transformers.pipeline)) {
+                        this.transformers = transformers;
+                        console.log('[VisionEmbedder] ✓ Transformers.js loaded:', Object.keys(transformers).slice(0, 10));
                         resolve(this.transformers);
                     } else {
+                        console.error('[VisionEmbedder] Transformers.js exports not found');
                         reject(new Error('Transformers.js failed to initialize'));
                     }
                 };
-                script.onerror = () => reject(new Error('Failed to load Transformers.js'));
+                script.onerror = (e) => {
+                    console.error('[VisionEmbedder] Script load error:', e);
+                    reject(new Error('Failed to load Transformers.js'));
+                };
                 document.head.appendChild(script);
             });
         }
@@ -1369,20 +1386,33 @@
                 await this.loadTransformersLibrary();
 
                 console.log('[VisionEmbedder] Loading CLIP model...');
+                console.log('[VisionEmbedder] Available exports:', Object.keys(this.transformers || {}).slice(0, 15));
 
                 const { AutoProcessor, CLIPVisionModelWithProjection } = this.transformers;
 
-                // Load processor and vision model
+                if (!AutoProcessor) {
+                    throw new Error('AutoProcessor not found in transformers exports');
+                }
+                if (!CLIPVisionModelWithProjection) {
+                    throw new Error('CLIPVisionModelWithProjection not found in transformers exports');
+                }
+
+                console.log('[VisionEmbedder] Loading processor...');
                 this.processor = await AutoProcessor.from_pretrained(this.modelName);
+                console.log('[VisionEmbedder] ✓ Processor loaded');
+
+                console.log('[VisionEmbedder] Loading vision model...');
                 this.model = await CLIPVisionModelWithProjection.from_pretrained(this.modelName, {
                     quantized: true // Use quantized for faster loading
                 });
+                console.log('[VisionEmbedder] ✓ Vision model loaded');
 
                 this.ready = true;
-                console.log('[VisionEmbedder] CLIP model loaded successfully');
+                console.log('[VisionEmbedder] ✓ CLIP fully initialized');
                 return true;
             } catch (err) {
-                console.error('[VisionEmbedder] Failed to load CLIP:', err);
+                console.error('[VisionEmbedder] ❌ Failed to load CLIP:', err.message);
+                console.error('[VisionEmbedder] Full error:', err);
                 this.ready = false;
                 return false;
             } finally {
@@ -2647,21 +2677,33 @@
                 // STAGE 1: Initialize CLIP model
                 this.showStatus('Loading CLIP model...', 'loading');
                 this.showProgress(2);
-                batchListDiv.innerHTML = '<div style="color: #666;">Loading vision model (first time may take ~30s)...</div>';
+                batchListDiv.innerHTML = '<div style="color: #666;">Loading Transformers.js library...</div>';
 
                 const clipReady = await this.embedder.initialize();
                 if (!clipReady) {
                     // Fallback to ORB-only if CLIP fails
-                    console.warn('[BatchSearch] CLIP unavailable, falling back to ORB-only');
+                    console.error('[BatchSearch] CLIP FAILED TO LOAD - falling back to ORB-only');
+                    batchListDiv.innerHTML = '<div style="color: #f44336;">⚠️ CLIP failed to load!<br/>Using ORB-only (less accurate)</div>';
+                    await this.delay(1500);
                     return this.startBatchSearchORBOnly();
                 }
+
+                // CLIP loaded successfully
+                console.log('[BatchSearch] ✓ CLIP model loaded successfully');
+                batchListDiv.innerHTML = '<div style="color: #4caf50;">✓ CLIP model loaded</div>';
 
                 // Get phone image embedding
                 this.showStatus('Computing phone image embedding...', 'loading');
                 this.showProgress(5);
 
                 const phoneEmbedding = await this.embedder.getEmbedding(this.phoneImage);
-                console.log('[BatchSearch] Phone embedding computed');
+
+                // Debug: log embedding info
+                console.log('[BatchSearch] Phone embedding:', {
+                    length: phoneEmbedding.length,
+                    sample: phoneEmbedding.slice(0, 5).map(v => v.toFixed(4)),
+                    norm: Math.sqrt(phoneEmbedding.reduce((s, v) => s + v*v, 0)).toFixed(4)
+                });
 
                 // Fetch all shots
                 this.showStatus('Fetching shot list...', 'loading');
@@ -2783,20 +2825,35 @@
                 similarities.sort((a, b) => b.similarity - a.similarity);
                 const topCandidates = similarities.slice(0, 20); // Top 20 for ORB verification
 
-                console.log('[BatchSearch] Top CLIP candidates:', topCandidates.map(c => ({
-                    id: c.id,
-                    sim: c.similarity.toFixed(3)
+                // Debug: log detailed similarity info
+                const simStats = {
+                    total: similarities.length,
+                    max: similarities[0]?.similarity.toFixed(3),
+                    min: similarities[similarities.length - 1]?.similarity.toFixed(3),
+                    top5: topCandidates.slice(0, 5).map(c => `${c.id}:${(c.similarity * 100).toFixed(1)}%`)
+                };
+                console.log('[BatchSearch] CLIP Similarity Stats:', simStats);
+                console.table(topCandidates.slice(0, 10).map(c => ({
+                    shotId: c.id,
+                    similarity: (c.similarity * 100).toFixed(1) + '%',
+                    cached: c.cached ? '✓' : '✗'
                 })));
 
                 // Update display with CLIP results
                 batchListDiv.innerHTML = `
-                    <div style="color: #666; margin-bottom: 8px;">Stage 1 complete: Top ${topCandidates.length} by visual similarity</div>
+                    <div style="color: #4caf50; margin-bottom: 8px; font-weight: bold;">
+                        ✓ CLIP Stage 1 complete
+                    </div>
+                    <div style="font-size: 10px; color: #666; margin-bottom: 4px;">
+                        Similarity range: ${(similarities[similarities.length-1]?.similarity * 100).toFixed(0)}% - ${(similarities[0]?.similarity * 100).toFixed(0)}%
+                    </div>
+                    <div style="font-size: 11px; margin-bottom: 8px;">Top ${topCandidates.length} by visual similarity:</div>
                     ${topCandidates.slice(0, 5).map((c, i) => `
-                        <div style="padding: 4px; font-size: 10px; color: #888;">
-                            ${i + 1}. Shot ${c.id} (sim: ${(c.similarity * 100).toFixed(1)}%)
+                        <div style="padding: 4px; font-size: 11px; background: ${i === 0 ? '#e3f2fd' : '#f5f5f5'}; margin: 2px 0; border-radius: 3px;">
+                            ${i + 1}. Shot ${c.id} — <strong style="color: #2196f3;">${(c.similarity * 100).toFixed(1)}%</strong>
                         </div>
                     `).join('')}
-                    <div style="color: #666; margin-top: 8px;">Stage 2: Geometric verification...</div>
+                    <div style="color: #666; margin-top: 8px;">Stage 2: ORB geometric verification...</div>
                 `;
 
                 // STAGE 3: ORB verification on top candidates
@@ -2959,7 +3016,12 @@
                 const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
 
                 const batchListDiv = this.panel.querySelector('.pf-batch-list');
-                batchListDiv.innerHTML = `<div style="color: #666;">ORB search: ${sampledShots.length} shots...</div>`;
+                batchListDiv.innerHTML = `
+                    <div style="color: #f44336; font-weight: bold; margin-bottom: 8px;">
+                        ⚠️ ORB-only mode (CLIP unavailable)
+                    </div>
+                    <div style="color: #666;">Searching ${sampledShots.length} shots...</div>
+                `;
 
                 for (let i = 0; i < sampledShots.length; i++) {
                     const shot = sampledShots[i];
