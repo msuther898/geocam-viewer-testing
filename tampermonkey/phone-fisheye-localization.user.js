@@ -1739,6 +1739,15 @@
                     ${ICONS.search} Match & Overlay
                 </button>
 
+                <button class="pf-btn pf-btn-secondary pf-batch-search-btn" disabled style="background: #9c27b0;">
+                    ${ICONS.search} Search ALL Shots (slow)
+                </button>
+
+                <div class="pf-batch-results" style="display:none; margin-top: 12px; max-height: 200px; overflow-y: auto;">
+                    <h5 style="margin: 0 0 8px 0; font-size: 12px;">Best Matches:</h5>
+                    <div class="pf-batch-list"></div>
+                </div>
+
                 <button class="pf-btn pf-btn-secondary pf-navigate-btn" style="display:none">
                     ${ICONS.navigate} Navigate to Position
                 </button>
@@ -1830,6 +1839,7 @@
             });
 
             this.panel.querySelector('.pf-localize-btn').addEventListener('click', () => this.startLocalization());
+            this.panel.querySelector('.pf-batch-search-btn').addEventListener('click', () => this.startBatchSearch());
             this.panel.querySelector('.pf-navigate-btn').addEventListener('click', () => this.navigateToResult());
             this.panel.querySelector('.pf-clear-btn').addEventListener('click', () => this.clearAll());
 
@@ -1943,6 +1953,7 @@
             reader.readAsDataURL(file);
 
             this.panel.querySelector('.pf-localize-btn').disabled = false;
+            this.panel.querySelector('.pf-batch-search-btn').disabled = false;
             this.panel.querySelector('.pf-clear-btn').style.display = 'block';
             this.showStatus('Photo loaded. Click "Match & Overlay" to localize.', 'info');
         }
@@ -2178,6 +2189,223 @@
                 btn.innerHTML = `${ICONS.search} Match & Overlay`;
                 this.isMatching = false;
             }
+        }
+
+        // ============================================
+        // BATCH SEARCH - Search ALL shots to find best match
+        // ============================================
+        async startBatchSearch() {
+            if (!this.phoneImage || this.isMatching) return;
+
+            this.isMatching = true;
+            this.batchResults = [];
+
+            const batchResultsDiv = this.panel.querySelector('.pf-batch-results');
+            const batchListDiv = this.panel.querySelector('.pf-batch-list');
+            batchResultsDiv.style.display = 'block';
+            batchListDiv.innerHTML = '<div style="color: #666;">Starting search...</div>';
+
+            try {
+                // Extract features from phone image once
+                this.showStatus('Extracting phone features...', 'loading');
+                this.showProgress(5);
+
+                const phoneMat = this.matcher.imageToMat(this.phoneImage, 600); // Smaller for speed
+                const phoneFeatures = this.matcher.extractFeatures(phoneMat, true); // Force ORB for speed
+
+                if (phoneFeatures.keypoints.size() < 50) {
+                    throw new Error('Not enough features in phone image');
+                }
+
+                // Fetch all shots
+                this.showStatus('Fetching shot list...', 'loading');
+                this.showProgress(10);
+
+                if (!this.cellId) {
+                    // Try to get cell ID from URL
+                    const urlMatch = window.location.href.match(/cell[+\s]([a-z0-9+]+)/i);
+                    if (urlMatch) {
+                        this.cellId = urlMatch[1];
+                    }
+                }
+
+                if (!this.cellId) {
+                    throw new Error('Could not determine cell ID');
+                }
+
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${this.cellId}/FeatureServer/0/query`;
+                const queryParams = new URLSearchParams({
+                    f: 'json',
+                    where: '1=1',
+                    outFields: 'id,heading',
+                    returnGeometry: 'true',
+                    returnZ: 'true',
+                    orderByFields: 'id ASC',
+                    resultRecordCount: '5000'
+                });
+
+                const response = await fetch(`${featureUrl}?${queryParams}`);
+                const data = await response.json();
+
+                if (!data.features || data.features.length === 0) {
+                    throw new Error('No shots found in cell');
+                }
+
+                const allShots = data.features.map(f => ({
+                    id: f.attributes.id,
+                    heading: f.attributes.heading,
+                    x: f.geometry.x,
+                    y: f.geometry.y,
+                    z: f.geometry.z || 0
+                }));
+
+                // Sample shots for efficiency (every Nth shot)
+                const sampleRate = Math.max(1, Math.floor(allShots.length / 100)); // Max ~100 samples
+                const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
+
+                this.showStatus(`Searching ${sampledShots.length} of ${allShots.length} shots...`, 'loading');
+                batchListDiv.innerHTML = `<div style="color: #666;">Searching ${sampledShots.length} shots...</div>`;
+
+                // Save current view
+                const originalParams = new URLSearchParams(window.location.hash.substring(1));
+                const originalShot = originalParams.get('shot');
+                const originalFacing = originalParams.get('facing');
+
+                // Search each shot
+                for (let i = 0; i < sampledShots.length; i++) {
+                    const shot = sampledShots[i];
+                    const progress = 15 + (i / sampledShots.length) * 80;
+                    this.showProgress(progress);
+                    this.showStatus(`Searching shot ${i + 1}/${sampledShots.length} (ID: ${shot.id})...`, 'loading');
+
+                    try {
+                        // Navigate to shot
+                        const params = new URLSearchParams(window.location.hash.substring(1));
+                        params.set('shot', shot.id);
+                        params.set('fov', '90'); // Wide FOV for search
+                        window.location.hash = params.toString();
+
+                        // Wait for view to load
+                        await this.delay(300);
+
+                        // Capture and match
+                        const { mat: panoMat, width: panoW, height: panoH } = this.matcher.capturePanoramaView();
+                        const panoFeatures = this.matcher.extractFeatures(panoMat, true); // Force ORB
+
+                        if (panoFeatures.keypoints.size() > 50) {
+                            const matches = this.matcher.matchFeatures(
+                                phoneFeatures.descriptors, panoFeatures.descriptors
+                            );
+                            const goodMatches = this.matcher.filterMatches(matches);
+
+                            if (goodMatches.length >= 8) {
+                                const homResult = this.matcher.computeHomographyWithMask(
+                                    phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
+                                );
+
+                                if (homResult && homResult.inliers >= 4) {
+                                    this.batchResults.push({
+                                        shotId: shot.id,
+                                        x: shot.x,
+                                        y: shot.y,
+                                        heading: shot.heading,
+                                        matches: goodMatches.length,
+                                        inliers: homResult.inliers,
+                                        confidence: homResult.inliers / homResult.total,
+                                        score: homResult.inliers // Primary sort key
+                                    });
+
+                                    // Update display with current best
+                                    this.updateBatchResultsDisplay(batchListDiv);
+                                }
+
+                                if (homResult?.mask) homResult.mask.delete();
+                            }
+                        }
+
+                        panoFeatures.keypoints.delete();
+                        panoFeatures.descriptors.delete();
+                        panoMat.delete();
+
+                    } catch (e) {
+                        console.warn(`[BatchSearch] Error on shot ${shot.id}:`, e);
+                    }
+                }
+
+                // Sort by score (inliers)
+                this.batchResults.sort((a, b) => b.score - a.score);
+                this.updateBatchResultsDisplay(batchListDiv);
+
+                // Navigate to best match
+                if (this.batchResults.length > 0) {
+                    const best = this.batchResults[0];
+                    this.showStatus(`Best match: Shot ${best.shotId} (${best.inliers} inliers)`, 'success');
+
+                    // Navigate to best shot
+                    const params = new URLSearchParams(window.location.hash.substring(1));
+                    params.set('shot', best.shotId);
+                    window.location.hash = params.toString();
+                } else {
+                    this.showStatus('No matches found', 'error');
+                    // Restore original view
+                    if (originalShot) {
+                        const params = new URLSearchParams(window.location.hash.substring(1));
+                        params.set('shot', originalShot);
+                        if (originalFacing) params.set('facing', originalFacing);
+                        window.location.hash = params.toString();
+                    }
+                }
+
+                // Cleanup
+                phoneFeatures.keypoints.delete();
+                phoneFeatures.descriptors.delete();
+                phoneMat.delete();
+
+                this.showProgress(100);
+
+            } catch (err) {
+                console.error('[BatchSearch] Error:', err);
+                this.showStatus(`Search failed: ${err.message}`, 'error');
+            } finally {
+                this.isMatching = false;
+            }
+        }
+
+        updateBatchResultsDisplay(container) {
+            if (!this.batchResults || this.batchResults.length === 0) {
+                container.innerHTML = '<div style="color: #666;">No matches yet...</div>';
+                return;
+            }
+
+            // Show top 10 results
+            const top10 = this.batchResults.slice(0, 10);
+            container.innerHTML = top10.map((r, i) => `
+                <div class="pf-batch-item" data-shot="${r.shotId}" style="
+                    padding: 6px 8px;
+                    margin: 4px 0;
+                    background: ${i === 0 ? '#e8f5e9' : '#f5f5f5'};
+                    border-radius: 4px;
+                    cursor: pointer;
+                    display: flex;
+                    justify-content: space-between;
+                    font-size: 11px;
+                    border-left: 3px solid ${i === 0 ? '#4caf50' : '#ccc'};
+                ">
+                    <span><strong>#${i + 1}</strong> Shot ${r.shotId}</span>
+                    <span style="color: #4caf50; font-weight: bold;">${r.inliers} inliers (${(r.confidence * 100).toFixed(0)}%)</span>
+                </div>
+            `).join('');
+
+            // Add click handlers to navigate to shot
+            container.querySelectorAll('.pf-batch-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const shotId = item.dataset.shot;
+                    const params = new URLSearchParams(window.location.hash.substring(1));
+                    params.set('shot', shotId);
+                    window.location.hash = params.toString();
+                    this.showStatus(`Navigated to shot ${shotId}`, 'info');
+                });
+            });
         }
 
         createImageOverlay() {
