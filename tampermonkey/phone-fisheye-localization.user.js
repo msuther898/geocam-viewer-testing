@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      7.0.0
-// @description  Match visualization with FOV cone, rays on map, 10K features, and correspondence lines
+// @version      8.0.0
+// @description  CLIP vision model for semantic similarity + ORB geometric verification
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @require      https://docs.opencv.org/4.8.0/opencv.js
+// @require      https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -1123,6 +1124,146 @@
     }
 
     // ============================================
+    // VISION EMBEDDER - CLIP-based semantic similarity
+    // ============================================
+    class VisionEmbedder {
+        constructor() {
+            this.ready = false;
+            this.loading = false;
+            this.processor = null;
+            this.model = null;
+            this.modelName = 'Xenova/clip-vit-base-patch32'; // Good balance of speed/quality
+        }
+
+        async initialize() {
+            if (this.ready || this.loading) return this.ready;
+            this.loading = true;
+
+            try {
+                console.log('[VisionEmbedder] Loading CLIP model...');
+
+                // Access Transformers.js from global scope
+                const { AutoProcessor, CLIPVisionModelWithProjection } = window.Transformers || self.Transformers;
+
+                // Load processor and vision model
+                this.processor = await AutoProcessor.from_pretrained(this.modelName);
+                this.model = await CLIPVisionModelWithProjection.from_pretrained(this.modelName, {
+                    quantized: true // Use quantized for faster loading
+                });
+
+                this.ready = true;
+                console.log('[VisionEmbedder] CLIP model loaded successfully');
+                return true;
+            } catch (err) {
+                console.error('[VisionEmbedder] Failed to load CLIP:', err);
+                this.ready = false;
+                return false;
+            } finally {
+                this.loading = false;
+            }
+        }
+
+        // Convert image element or canvas to embedding
+        async getEmbedding(imageSource) {
+            if (!this.ready) {
+                throw new Error('Vision model not initialized');
+            }
+
+            try {
+                // Convert to canvas if needed
+                let canvas;
+                if (imageSource instanceof HTMLCanvasElement) {
+                    canvas = imageSource;
+                } else if (imageSource instanceof HTMLImageElement) {
+                    canvas = document.createElement('canvas');
+                    canvas.width = imageSource.naturalWidth || imageSource.width;
+                    canvas.height = imageSource.naturalHeight || imageSource.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(imageSource, 0, 0);
+                } else {
+                    throw new Error('Invalid image source');
+                }
+
+                // Convert canvas to blob for processing
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+
+                // Create RawImage from blob
+                const { RawImage } = window.Transformers || self.Transformers;
+                const image = await RawImage.fromBlob(blob);
+
+                // Process image
+                const inputs = await this.processor(image);
+
+                // Get embedding
+                const output = await this.model(inputs);
+
+                // Extract embedding vector and normalize
+                const embedding = Array.from(output.image_embeds.data);
+                const norm = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
+                return embedding.map(v => v / norm);
+            } catch (err) {
+                console.error('[VisionEmbedder] Embedding error:', err);
+                throw err;
+            }
+        }
+
+        // Compute cosine similarity between two embeddings
+        cosineSimilarity(emb1, emb2) {
+            let dot = 0;
+            for (let i = 0; i < emb1.length; i++) {
+                dot += emb1[i] * emb2[i];
+            }
+            return dot; // Already normalized, so dot product = cosine similarity
+        }
+
+        // Capture current panorama view as canvas
+        capturePanoCanvas() {
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return null;
+
+            const captureCanvas = document.createElement('canvas');
+            const width = Math.min(canvas.width, 512); // Resize for speed
+            const height = Math.min(canvas.height, 512);
+            captureCanvas.width = width;
+            captureCanvas.height = height;
+
+            const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
+            if (gl) {
+                const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+                gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+                // Flip and resize
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width;
+                tempCanvas.height = canvas.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                const imageData = tempCtx.createImageData(canvas.width, canvas.height);
+
+                for (let y = 0; y < canvas.height; y++) {
+                    for (let x = 0; x < canvas.width; x++) {
+                        const srcIdx = (y * canvas.width + x) * 4;
+                        const dstIdx = ((canvas.height - 1 - y) * canvas.width + x) * 4;
+                        imageData.data[dstIdx] = pixels[srcIdx];
+                        imageData.data[dstIdx + 1] = pixels[srcIdx + 1];
+                        imageData.data[dstIdx + 2] = pixels[srcIdx + 2];
+                        imageData.data[dstIdx + 3] = pixels[srcIdx + 3];
+                    }
+                }
+                tempCtx.putImageData(imageData, 0, 0);
+
+                // Resize to target
+                const ctx = captureCanvas.getContext('2d');
+                ctx.drawImage(tempCanvas, 0, 0, width, height);
+            } else {
+                const ctx = captureCanvas.getContext('2d');
+                ctx.drawImage(canvas, 0, 0, width, height);
+            }
+
+            return captureCanvas;
+        }
+    }
+
+    // ============================================
     // PHONE FISHEYE LOCALIZATION CLASS
     // ============================================
     class PhoneFisheyeLocalization {
@@ -1135,6 +1276,7 @@
             this.estimatedFov = 70;
             this.isMatching = false;
             this.matcher = new FeatureMatcher();
+            this.embedder = new VisionEmbedder(); // Add vision embedder
             this.matchCanvas = null;
             this.lastHomography = null;
             this.lastResult = null;
@@ -2218,7 +2360,7 @@
         }
 
         // ============================================
-        // BATCH SEARCH - Search ALL shots to find best match
+        // BATCH SEARCH - Two-stage: CLIP similarity + ORB verification
         // ============================================
         async startBatchSearch() {
             if (!this.phoneImage || this.isMatching) return;
@@ -2232,23 +2374,30 @@
             batchListDiv.innerHTML = '<div style="color: #666;">Starting search...</div>';
 
             try {
-                // Extract features from phone image once
-                this.showStatus('Extracting phone features...', 'loading');
+                // STAGE 1: Initialize CLIP model
+                this.showStatus('Loading CLIP model...', 'loading');
+                this.showProgress(2);
+                batchListDiv.innerHTML = '<div style="color: #666;">Loading vision model (first time may take ~30s)...</div>';
+
+                const clipReady = await this.embedder.initialize();
+                if (!clipReady) {
+                    // Fallback to ORB-only if CLIP fails
+                    console.warn('[BatchSearch] CLIP unavailable, falling back to ORB-only');
+                    return this.startBatchSearchORBOnly();
+                }
+
+                // Get phone image embedding
+                this.showStatus('Computing phone image embedding...', 'loading');
                 this.showProgress(5);
 
-                const { mat: phoneMat } = this.matcher.imageToMat(this.phoneImage, 600); // Smaller for speed
-                const phoneFeatures = this.matcher.extractFeatures(phoneMat, true); // Force ORB for speed
-
-                if (phoneFeatures.keypoints.size() < 50) {
-                    throw new Error('Not enough features in phone image');
-                }
+                const phoneEmbedding = await this.embedder.getEmbedding(this.phoneImage);
+                console.log('[BatchSearch] Phone embedding computed');
 
                 // Fetch all shots
                 this.showStatus('Fetching shot list...', 'loading');
-                this.showProgress(10);
+                this.showProgress(8);
 
                 if (!this.cellId) {
-                    // Try to get cell ID from URL
                     const urlMatch = window.location.href.match(/cell[+\s]([a-z0-9+]+)/i);
                     if (urlMatch) {
                         this.cellId = urlMatch[1];
@@ -2285,38 +2434,104 @@
                     z: f.geometry.z || 0
                 }));
 
-                // Sample shots for efficiency (every Nth shot)
-                const sampleRate = Math.max(1, Math.floor(allShots.length / 100)); // Max ~100 samples
+                // Sample shots for CLIP similarity (every Nth shot)
+                const sampleRate = Math.max(1, Math.floor(allShots.length / 150)); // ~150 samples for CLIP
                 const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
-
-                this.showStatus(`Searching ${sampledShots.length} of ${allShots.length} shots...`, 'loading');
-                batchListDiv.innerHTML = `<div style="color: #666;">Searching ${sampledShots.length} shots...</div>`;
 
                 // Save current view
                 const originalParams = new URLSearchParams(window.location.hash.substring(1));
                 const originalShot = originalParams.get('shot');
                 const originalFacing = originalParams.get('facing');
 
-                // Search each shot
+                // STAGE 2: Compute CLIP similarity for all sampled shots
+                this.showStatus(`Computing similarity for ${sampledShots.length} shots...`, 'loading');
+                batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity (${sampledShots.length} shots)...</div>`;
+
+                const similarities = [];
+
                 for (let i = 0; i < sampledShots.length; i++) {
                     const shot = sampledShots[i];
-                    const progress = 15 + (i / sampledShots.length) * 80;
+                    const progress = 10 + (i / sampledShots.length) * 40;
                     this.showProgress(progress);
-                    this.showStatus(`Searching shot ${i + 1}/${sampledShots.length} (ID: ${shot.id})...`, 'loading');
+
+                    if (i % 10 === 0) {
+                        this.showStatus(`CLIP: ${i + 1}/${sampledShots.length} shots...`, 'loading');
+                    }
 
                     try {
                         // Navigate to shot
                         const params = new URLSearchParams(window.location.hash.substring(1));
                         params.set('shot', shot.id);
-                        params.set('fov', '90'); // Wide FOV for search
+                        params.set('fov', '80'); // Medium-wide FOV
                         window.location.hash = params.toString();
 
                         // Wait for view to load
+                        await this.delay(200);
+
+                        // Capture and get embedding
+                        const panoCanvas = this.embedder.capturePanoCanvas();
+                        if (panoCanvas) {
+                            const panoEmbedding = await this.embedder.getEmbedding(panoCanvas);
+                            const similarity = this.embedder.cosineSimilarity(phoneEmbedding, panoEmbedding);
+
+                            similarities.push({
+                                ...shot,
+                                similarity
+                            });
+                        }
+                    } catch (e) {
+                        console.warn(`[BatchSearch] CLIP error on shot ${shot.id}:`, e);
+                    }
+                }
+
+                // Sort by similarity and take top candidates
+                similarities.sort((a, b) => b.similarity - a.similarity);
+                const topCandidates = similarities.slice(0, 20); // Top 20 for ORB verification
+
+                console.log('[BatchSearch] Top CLIP candidates:', topCandidates.map(c => ({
+                    id: c.id,
+                    sim: c.similarity.toFixed(3)
+                })));
+
+                // Update display with CLIP results
+                batchListDiv.innerHTML = `
+                    <div style="color: #666; margin-bottom: 8px;">Stage 1 complete: Top ${topCandidates.length} by visual similarity</div>
+                    ${topCandidates.slice(0, 5).map((c, i) => `
+                        <div style="padding: 4px; font-size: 10px; color: #888;">
+                            ${i + 1}. Shot ${c.id} (sim: ${(c.similarity * 100).toFixed(1)}%)
+                        </div>
+                    `).join('')}
+                    <div style="color: #666; margin-top: 8px;">Stage 2: Geometric verification...</div>
+                `;
+
+                // STAGE 3: ORB verification on top candidates
+                this.showStatus('Stage 2: Geometric verification...', 'loading');
+
+                const { mat: phoneMat } = this.matcher.imageToMat(this.phoneImage, 600);
+                const phoneFeatures = this.matcher.extractFeatures(phoneMat, true);
+
+                if (phoneFeatures.keypoints.size() < 50) {
+                    throw new Error('Not enough features in phone image');
+                }
+
+                for (let i = 0; i < topCandidates.length; i++) {
+                    const shot = topCandidates[i];
+                    const progress = 55 + (i / topCandidates.length) * 40;
+                    this.showProgress(progress);
+                    this.showStatus(`Verifying ${i + 1}/${topCandidates.length}: Shot ${shot.id}...`, 'loading');
+
+                    try {
+                        // Navigate to shot
+                        const params = new URLSearchParams(window.location.hash.substring(1));
+                        params.set('shot', shot.id);
+                        params.set('fov', '90');
+                        window.location.hash = params.toString();
+
                         await this.delay(300);
 
-                        // Capture and match
-                        const { mat: panoMat, width: panoW, height: panoH } = this.matcher.capturePanoramaView();
-                        const panoFeatures = this.matcher.extractFeatures(panoMat, true); // Force ORB
+                        // Capture and match with ORB
+                        const { mat: panoMat } = this.matcher.capturePanoramaView();
+                        const panoFeatures = this.matcher.extractFeatures(panoMat, true);
 
                         if (panoFeatures.keypoints.size() > 50) {
                             const matches = this.matcher.matchFeatures(
@@ -2330,6 +2545,9 @@
                                 );
 
                                 if (homResult && homResult.inliers >= 4) {
+                                    // Combined score: CLIP similarity + geometric inliers
+                                    const combinedScore = (shot.similarity * 100) + (homResult.inliers * 0.5);
+
                                     this.batchResults.push({
                                         shotId: shot.id,
                                         x: shot.x,
@@ -2338,10 +2556,10 @@
                                         matches: goodMatches.length,
                                         inliers: homResult.inliers,
                                         confidence: homResult.inliers / homResult.total,
-                                        score: homResult.inliers // Primary sort key
+                                        similarity: shot.similarity,
+                                        score: combinedScore
                                     });
 
-                                    // Update display with current best
                                     this.updateBatchResultsDisplay(batchListDiv);
                                 }
 
@@ -2354,26 +2572,24 @@
                         panoMat.delete();
 
                     } catch (e) {
-                        console.warn(`[BatchSearch] Error on shot ${shot.id}:`, e);
+                        console.warn(`[BatchSearch] ORB error on shot ${shot.id}:`, e);
                     }
                 }
 
-                // Sort by score (inliers)
+                // Sort by combined score
                 this.batchResults.sort((a, b) => b.score - a.score);
                 this.updateBatchResultsDisplay(batchListDiv);
 
                 // Navigate to best match
                 if (this.batchResults.length > 0) {
                     const best = this.batchResults[0];
-                    this.showStatus(`Best match: Shot ${best.shotId} (${best.inliers} inliers)`, 'success');
+                    this.showStatus(`Best: Shot ${best.shotId} (${(best.similarity * 100).toFixed(0)}% sim, ${best.inliers} inliers)`, 'success');
 
-                    // Navigate to best shot
                     const params = new URLSearchParams(window.location.hash.substring(1));
                     params.set('shot', best.shotId);
                     window.location.hash = params.toString();
                 } else {
                     this.showStatus('No matches found', 'error');
-                    // Restore original view
                     if (originalShot) {
                         const params = new URLSearchParams(window.location.hash.substring(1));
                         params.set('shot', originalShot);
@@ -2397,6 +2613,136 @@
             }
         }
 
+        // Fallback: ORB-only batch search (if CLIP unavailable)
+        async startBatchSearchORBOnly() {
+            this.showStatus('Using ORB-only search (CLIP unavailable)...', 'loading');
+
+            try {
+                const { mat: phoneMat } = this.matcher.imageToMat(this.phoneImage, 600);
+                const phoneFeatures = this.matcher.extractFeatures(phoneMat, true);
+
+                if (phoneFeatures.keypoints.size() < 50) {
+                    throw new Error('Not enough features in phone image');
+                }
+
+                if (!this.cellId) {
+                    const urlMatch = window.location.href.match(/cell[+\s]([a-z0-9+]+)/i);
+                    if (urlMatch) this.cellId = urlMatch[1];
+                }
+
+                if (!this.cellId) throw new Error('Could not determine cell ID');
+
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${this.cellId}/FeatureServer/0/query`;
+                const queryParams = new URLSearchParams({
+                    f: 'json',
+                    where: '1=1',
+                    outFields: 'id,heading',
+                    returnGeometry: 'true',
+                    returnZ: 'true',
+                    orderByFields: 'id ASC',
+                    resultRecordCount: '5000'
+                });
+
+                const response = await fetch(`${featureUrl}?${queryParams}`);
+                const data = await response.json();
+
+                if (!data.features || data.features.length === 0) {
+                    throw new Error('No shots found in cell');
+                }
+
+                const allShots = data.features.map(f => ({
+                    id: f.attributes.id,
+                    heading: f.attributes.heading,
+                    x: f.geometry.x,
+                    y: f.geometry.y,
+                    z: f.geometry.z || 0
+                }));
+
+                const sampleRate = Math.max(1, Math.floor(allShots.length / 100));
+                const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
+
+                const batchListDiv = this.panel.querySelector('.pf-batch-list');
+                batchListDiv.innerHTML = `<div style="color: #666;">ORB search: ${sampledShots.length} shots...</div>`;
+
+                for (let i = 0; i < sampledShots.length; i++) {
+                    const shot = sampledShots[i];
+                    this.showProgress(10 + (i / sampledShots.length) * 85);
+                    this.showStatus(`ORB: ${i + 1}/${sampledShots.length}...`, 'loading');
+
+                    try {
+                        const params = new URLSearchParams(window.location.hash.substring(1));
+                        params.set('shot', shot.id);
+                        params.set('fov', '90');
+                        window.location.hash = params.toString();
+
+                        await this.delay(300);
+
+                        const { mat: panoMat } = this.matcher.capturePanoramaView();
+                        const panoFeatures = this.matcher.extractFeatures(panoMat, true);
+
+                        if (panoFeatures.keypoints.size() > 50) {
+                            const matches = this.matcher.matchFeatures(
+                                phoneFeatures.descriptors, panoFeatures.descriptors
+                            );
+                            const goodMatches = this.matcher.filterMatches(matches);
+
+                            if (goodMatches.length >= 8) {
+                                const homResult = this.matcher.computeHomographyWithMask(
+                                    phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
+                                );
+
+                                if (homResult && homResult.inliers >= 4) {
+                                    this.batchResults.push({
+                                        shotId: shot.id,
+                                        x: shot.x,
+                                        y: shot.y,
+                                        heading: shot.heading,
+                                        matches: goodMatches.length,
+                                        inliers: homResult.inliers,
+                                        confidence: homResult.inliers / homResult.total,
+                                        score: homResult.inliers
+                                    });
+                                    this.updateBatchResultsDisplay(batchListDiv);
+                                }
+                                if (homResult?.mask) homResult.mask.delete();
+                            }
+                        }
+
+                        panoFeatures.keypoints.delete();
+                        panoFeatures.descriptors.delete();
+                        panoMat.delete();
+
+                    } catch (e) {
+                        console.warn(`[BatchSearch] Error on shot ${shot.id}:`, e);
+                    }
+                }
+
+                this.batchResults.sort((a, b) => b.score - a.score);
+                this.updateBatchResultsDisplay(batchListDiv);
+
+                if (this.batchResults.length > 0) {
+                    const best = this.batchResults[0];
+                    this.showStatus(`Best: Shot ${best.shotId} (${best.inliers} inliers)`, 'success');
+                    const params = new URLSearchParams(window.location.hash.substring(1));
+                    params.set('shot', best.shotId);
+                    window.location.hash = params.toString();
+                } else {
+                    this.showStatus('No matches found', 'error');
+                }
+
+                phoneFeatures.keypoints.delete();
+                phoneFeatures.descriptors.delete();
+                phoneMat.delete();
+                this.showProgress(100);
+
+            } catch (err) {
+                console.error('[BatchSearch] ORB-only error:', err);
+                this.showStatus(`Search failed: ${err.message}`, 'error');
+            } finally {
+                this.isMatching = false;
+            }
+        }
+
         updateBatchResultsDisplay(container) {
             if (!this.batchResults || this.batchResults.length === 0) {
                 container.innerHTML = '<div style="color: #666;">No matches yet...</div>';
@@ -2405,6 +2751,8 @@
 
             // Show top 10 results
             const top10 = this.batchResults.slice(0, 10);
+            const hasSimilarity = top10[0]?.similarity !== undefined;
+
             container.innerHTML = top10.map((r, i) => `
                 <div class="pf-batch-item" data-shot="${r.shotId}" style="
                     padding: 6px 8px;
@@ -2414,11 +2762,15 @@
                     cursor: pointer;
                     display: flex;
                     justify-content: space-between;
+                    align-items: center;
                     font-size: 11px;
                     border-left: 3px solid ${i === 0 ? '#4caf50' : '#ccc'};
                 ">
                     <span><strong>#${i + 1}</strong> Shot ${r.shotId}</span>
-                    <span style="color: #4caf50; font-weight: bold;">${r.inliers} inliers (${(r.confidence * 100).toFixed(0)}%)</span>
+                    <span style="text-align: right;">
+                        ${hasSimilarity ? `<span style="color: #2196f3;">${(r.similarity * 100).toFixed(0)}% sim</span> · ` : ''}
+                        <span style="color: #4caf50; font-weight: bold;">${r.inliers} inliers</span>
+                    </span>
                 </div>
             `).join('');
 
