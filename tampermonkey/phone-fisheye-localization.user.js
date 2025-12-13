@@ -2236,7 +2236,7 @@
                 this.showStatus('Extracting phone features...', 'loading');
                 this.showProgress(5);
 
-                const phoneMat = this.matcher.imageToMat(this.phoneImage, 600); // Smaller for speed
+                const { mat: phoneMat } = this.matcher.imageToMat(this.phoneImage, 600); // Smaller for speed
                 const phoneFeatures = this.matcher.extractFeatures(phoneMat, true); // Force ORB for speed
 
                 if (phoneFeatures.keypoints.size() < 50) {
