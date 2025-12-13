@@ -1988,9 +1988,9 @@
                     homResult.homography, panoW, panoH, this.estimatedFov
                 );
 
-                const params = new URLSearchParams(window.location.hash.substring(1));
-                const currentFacing = parseFloat(params.get('facing') || '0');
-                const currentHorizon = parseFloat(params.get('horizon') || '0');
+                // Use viewParams already defined above
+                const currentFacing = parseFloat(viewParams.facing || 0);
+                const currentHorizon = parseFloat(viewParams.horizon || 0);
 
                 this.lastResult = {
                     facing: (currentFacing + pose.yawOffset + 360) % 360,
