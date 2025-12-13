@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.4.0
-// @description  Add detailed search results panel with per-shot tracking
+// @version      8.5.0
+// @description  Switch from CLIP to DINOv2 for better local feature matching
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -1464,17 +1464,16 @@
     }
 
     // ============================================
-    // VISION EMBEDDER - CLIP-based semantic similarity
+    // VISION EMBEDDER - DINOv2 patch-level features
     // ============================================
     class VisionEmbedder {
         constructor() {
             this.ready = false;
             this.loading = false;
-            this.processor = null;
-            this.model = null;
+            this.extractor = null;
             this.transformers = null;
-            this.cache = new EmbeddingCache(); // Add embedding cache
-            this.modelName = 'Xenova/clip-vit-base-patch32'; // Good balance of speed/quality
+            this.cache = new EmbeddingCache();
+            this.modelName = 'Xenova/dinov2-small'; // DINOv2 for better local feature matching
         }
 
         // Dynamically load Transformers.js library using ES module import
@@ -1485,7 +1484,6 @@
 
             try {
                 // Use dynamic import() for ES modules
-                // This works in modern browsers even from non-module scripts
                 this.transformers = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
 
                 console.log('[VisionEmbedder] ✓ Transformers.js loaded via import()');
@@ -1501,7 +1499,6 @@
                     const response = await fetch('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js');
                     const code = await response.text();
 
-                    // Create a blob URL and import as module
                     const blob = new Blob([code], { type: 'application/javascript' });
                     const blobUrl = URL.createObjectURL(blob);
 
@@ -1525,33 +1522,28 @@
                 // First load the library
                 await this.loadTransformersLibrary();
 
-                console.log('[VisionEmbedder] Loading CLIP model...');
-                console.log('[VisionEmbedder] Available exports:', Object.keys(this.transformers || {}).slice(0, 15));
+                console.log('[VisionEmbedder] Loading DINOv2 model...');
+                console.log('[VisionEmbedder] Model:', this.modelName);
 
-                const { AutoProcessor, CLIPVisionModelWithProjection } = this.transformers;
+                const { pipeline } = this.transformers;
 
-                if (!AutoProcessor) {
-                    throw new Error('AutoProcessor not found in transformers exports');
-                }
-                if (!CLIPVisionModelWithProjection) {
-                    throw new Error('CLIPVisionModelWithProjection not found in transformers exports');
+                if (!pipeline) {
+                    throw new Error('pipeline not found in transformers exports');
                 }
 
-                console.log('[VisionEmbedder] Loading processor...');
-                this.processor = await AutoProcessor.from_pretrained(this.modelName);
-                console.log('[VisionEmbedder] ✓ Processor loaded');
-
-                console.log('[VisionEmbedder] Loading vision model...');
-                this.model = await CLIPVisionModelWithProjection.from_pretrained(this.modelName, {
+                // Use image-feature-extraction pipeline for DINOv2
+                console.log('[VisionEmbedder] Creating feature extraction pipeline...');
+                this.extractor = await pipeline('image-feature-extraction', this.modelName, {
                     quantized: true // Use quantized for faster loading
                 });
-                console.log('[VisionEmbedder] ✓ Vision model loaded');
+
+                console.log('[VisionEmbedder] ✓ DINOv2 pipeline created');
 
                 this.ready = true;
-                console.log('[VisionEmbedder] ✓ CLIP fully initialized');
+                console.log('[VisionEmbedder] ✓ DINOv2 fully initialized');
                 return true;
             } catch (err) {
-                console.error('[VisionEmbedder] ❌ Failed to load CLIP:', err.message);
+                console.error('[VisionEmbedder] ❌ Failed to load DINOv2:', err.message);
                 console.error('[VisionEmbedder] Full error:', err);
                 this.ready = false;
                 return false;
@@ -1581,25 +1573,72 @@
                     throw new Error('Invalid image source');
                 }
 
-                // Convert canvas to blob for processing
-                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+                // Convert canvas to data URL for pipeline
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-                // Create RawImage from blob
-                const { RawImage } = this.transformers;
-                const image = await RawImage.fromBlob(blob);
+                // Run DINOv2 feature extraction
+                // Returns tensor of shape [1, num_patches + 1, hidden_dim]
+                // First token is [CLS], rest are patch tokens
+                const output = await this.extractor(dataUrl, { pooling: 'none' });
 
-                // Process image
-                const inputs = await this.processor(image);
+                // Output is a Tensor - get the data
+                const features = output.tolist()[0]; // [num_patches + 1, hidden_dim]
 
-                // Get embedding
-                const output = await this.model(inputs);
+                // Use [CLS] token (first token) as global embedding
+                const clsEmbedding = features[0];
 
-                // Extract embedding vector and normalize
-                const embedding = Array.from(output.image_embeds.data);
-                const norm = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
-                return embedding.map(v => v / norm);
+                // Normalize the embedding
+                const norm = Math.sqrt(clsEmbedding.reduce((sum, v) => sum + v * v, 0));
+                const normalizedEmbedding = clsEmbedding.map(v => v / norm);
+
+                return normalizedEmbedding;
             } catch (err) {
                 console.error('[VisionEmbedder] Embedding error:', err);
+                throw err;
+            }
+        }
+
+        // Get patch-level embeddings for more detailed matching
+        async getPatchEmbeddings(imageSource) {
+            if (!this.ready) {
+                throw new Error('Vision model not initialized');
+            }
+
+            try {
+                let canvas;
+                if (imageSource instanceof HTMLCanvasElement) {
+                    canvas = imageSource;
+                } else if (imageSource instanceof HTMLImageElement) {
+                    canvas = document.createElement('canvas');
+                    canvas.width = imageSource.naturalWidth || imageSource.width;
+                    canvas.height = imageSource.naturalHeight || imageSource.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(imageSource, 0, 0);
+                } else {
+                    throw new Error('Invalid image source');
+                }
+
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+                const output = await this.extractor(dataUrl, { pooling: 'none' });
+                const features = output.tolist()[0];
+
+                // Return both CLS token and patch tokens
+                const clsToken = features[0];
+                const patchTokens = features.slice(1); // All patches except CLS
+
+                // Normalize all embeddings
+                const normalize = (emb) => {
+                    const norm = Math.sqrt(emb.reduce((sum, v) => sum + v * v, 0));
+                    return emb.map(v => v / norm);
+                };
+
+                return {
+                    cls: normalize(clsToken),
+                    patches: patchTokens.map(normalize),
+                    numPatches: patchTokens.length
+                };
+            } catch (err) {
+                console.error('[VisionEmbedder] Patch embedding error:', err);
                 throw err;
             }
         }
@@ -1611,6 +1650,28 @@
                 dot += emb1[i] * emb2[i];
             }
             return dot; // Already normalized, so dot product = cosine similarity
+        }
+
+        // Compute patch-level similarity (best matching patches)
+        patchSimilarity(patches1, patches2, topK = 10) {
+            // For each patch in image1, find best match in image2
+            let totalSim = 0;
+            let matchCount = 0;
+
+            for (const p1 of patches1) {
+                let bestSim = -1;
+                for (const p2 of patches2) {
+                    const sim = this.cosineSimilarity(p1, p2);
+                    if (sim > bestSim) bestSim = sim;
+                }
+                if (bestSim > 0.5) { // Only count good matches
+                    totalSim += bestSim;
+                    matchCount++;
+                }
+            }
+
+            // Return average similarity of matching patches
+            return matchCount > 0 ? totalSim / matchCount : 0;
         }
 
         // Capture current panorama view as canvas
@@ -2817,7 +2878,7 @@
         }
 
         // ============================================
-        // BATCH SEARCH - Two-stage: CLIP similarity + ORB verification
+        // BATCH SEARCH - Two-stage: DINOv2 similarity + ORB verification
         // ============================================
         async startBatchSearch() {
             if (!this.phoneImage || this.isMatching) return;
@@ -2827,17 +2888,17 @@
 
             // Initialize detailed tracking for ALL shots processed
             this.detailedResults = {
-                clipStage: [],      // All shots processed in CLIP stage
+                clipStage: [],      // All shots processed in DINOv2 stage (kept name for compatibility)
                 orbStage: [],       // Shots sent to ORB verification
                 matched: [],        // Successfully matched shots
                 rejected: [],       // Rejected (not enough inliers, etc.)
                 failed: [],         // Failed to load/process
                 stats: {
                     totalShots: 0,
-                    sampledForClip: 0,
+                    sampledForClip: 0,  // kept name for compatibility
                     cachedEmbeddings: 0,
                     computedEmbeddings: 0,
-                    clipFailed: 0,
+                    clipFailed: 0,      // kept name for compatibility
                     sentToOrb: 0,
                     orbMatched: 0,
                     orbRejected: 0,
@@ -2855,23 +2916,23 @@
             this.updateDetailedResultsSummary();
 
             try {
-                // STAGE 1: Initialize CLIP model
-                this.showStatus('Loading CLIP model...', 'loading');
+                // STAGE 1: Initialize DINOv2 model
+                this.showStatus('Loading DINOv2 model...', 'loading');
                 this.showProgress(2);
                 batchListDiv.innerHTML = '<div style="color: #666;">Loading Transformers.js library...</div>';
 
-                const clipReady = await this.embedder.initialize();
-                if (!clipReady) {
-                    // Fallback to ORB-only if CLIP fails
-                    console.error('[BatchSearch] CLIP FAILED TO LOAD - falling back to ORB-only');
-                    batchListDiv.innerHTML = '<div style="color: #f44336;">⚠️ CLIP failed to load!<br/>Using ORB-only (less accurate)</div>';
+                const modelReady = await this.embedder.initialize();
+                if (!modelReady) {
+                    // Fallback to ORB-only if DINOv2 fails
+                    console.error('[BatchSearch] DINOv2 FAILED TO LOAD - falling back to ORB-only');
+                    batchListDiv.innerHTML = '<div style="color: #f44336;">⚠️ DINOv2 failed to load!<br/>Using ORB-only (less accurate)</div>';
                     await this.delay(1500);
                     return this.startBatchSearchORBOnly();
                 }
 
-                // CLIP loaded successfully
-                console.log('[BatchSearch] ✓ CLIP model loaded successfully');
-                batchListDiv.innerHTML = '<div style="color: #4caf50;">✓ CLIP model loaded</div>';
+                // DINOv2 loaded successfully
+                console.log('[BatchSearch] ✓ DINOv2 model loaded successfully');
+                batchListDiv.innerHTML = '<div style="color: #4caf50;">✓ DINOv2 model loaded</div>';
 
                 // Get phone image embedding
                 this.showStatus('Computing phone image embedding...', 'loading');
@@ -2941,10 +3002,11 @@
                 const originalShot = originalParams.get('shot');
                 const originalFacing = originalParams.get('facing');
 
-                // STAGE 2: Compute CLIP similarity (with caching)
+                // STAGE 2: Compute DINOv2 similarity (with caching)
                 const searchFov = 80;
 
                 // Check cache for existing embeddings
+                // NOTE: Clear cache if switching from CLIP to DINOv2!
                 this.showStatus('Checking embedding cache...', 'loading');
                 const shotIds = sampledShots.map(s => s.id);
                 const cachedEmbeddings = await this.embedder.cache.getMany(this.cellId, shotIds, searchFov);
@@ -2957,7 +3019,7 @@
                 this.detailedResults.stats.cachedEmbeddings = cachedCount;
                 this.updateDetailedResultsSummary();
 
-                batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity<br/>📦 ${cachedCount} cached, 🔄 ${uncachedShots.length} to compute...</div>`;
+                batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: DINOv2 similarity<br/>📦 ${cachedCount} cached, 🔄 ${uncachedShots.length} to compute...</div>`;
 
                 const similarities = [];
 
@@ -2985,8 +3047,8 @@
                     this.showProgress(progress);
 
                     if (i % 10 === 0) {
-                        this.showStatus(`CLIP: ${i + 1}/${uncachedShots.length} (${cachedCount} cached)...`, 'loading');
-                        batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity<br/>📦 ${cachedCount} cached ✓<br/>🔄 Computing ${i + 1}/${uncachedShots.length}...</div>`;
+                        this.showStatus(`DINOv2: ${i + 1}/${uncachedShots.length} (${cachedCount} cached)...`, 'loading');
+                        batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: DINOv2 similarity<br/>📦 ${cachedCount} cached ✓<br/>🔄 Computing ${i + 1}/${uncachedShots.length}...</div>`;
                     }
 
                     try {
@@ -3056,17 +3118,17 @@
                     min: similarities[similarities.length - 1]?.similarity.toFixed(3),
                     top5: topCandidates.slice(0, 5).map(c => `${c.id}:${(c.similarity * 100).toFixed(1)}%`)
                 };
-                console.log('[BatchSearch] CLIP Similarity Stats:', simStats);
+                console.log('[BatchSearch] DINOv2 Similarity Stats:', simStats);
                 console.table(topCandidates.slice(0, 10).map(c => ({
                     shotId: c.id,
                     similarity: (c.similarity * 100).toFixed(1) + '%',
                     cached: c.cached ? '✓' : '✗'
                 })));
 
-                // Update display with CLIP results
+                // Update display with DINOv2 results
                 batchListDiv.innerHTML = `
                     <div style="color: #4caf50; margin-bottom: 8px; font-weight: bold;">
-                        ✓ CLIP Stage 1 complete
+                        ✓ DINOv2 Stage 1 complete
                     </div>
                     <div style="font-size: 10px; color: #666; margin-bottom: 4px;">
                         Similarity range: ${(similarities[similarities.length-1]?.similarity * 100).toFixed(0)}% - ${(similarities[0]?.similarity * 100).toFixed(0)}%
