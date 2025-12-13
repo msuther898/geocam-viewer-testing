@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.6.0
-// @description  Add thorough search mode and cancel button
+// @version      8.7.0
+// @description  Add ML description generation for shots (smol attribute)
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -1722,6 +1722,215 @@
     }
 
     // ============================================
+    // IMAGE CAPTIONER - SmolVLM/BLIP for shot descriptions
+    // ============================================
+    class ImageCaptioner {
+        constructor() {
+            this.ready = false;
+            this.loading = false;
+            this.captioner = null;
+            this.transformers = null;
+            // Use BLIP for image captioning (well-supported in Transformers.js)
+            // Can upgrade to SmolVLM when better supported: 'HuggingFaceTB/SmolVLM-256M-Instruct'
+            this.modelName = 'Xenova/vit-gpt2-image-captioning';
+        }
+
+        async loadTransformersLibrary() {
+            if (this.transformers) return this.transformers;
+
+            console.log('[ImageCaptioner] Loading Transformers.js...');
+            try {
+                this.transformers = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
+                console.log('[ImageCaptioner] ✓ Transformers.js loaded');
+                return this.transformers;
+            } catch (err) {
+                console.error('[ImageCaptioner] Failed to load:', err);
+                throw err;
+            }
+        }
+
+        async initialize() {
+            if (this.ready || this.loading) return this.ready;
+            this.loading = true;
+
+            try {
+                await this.loadTransformersLibrary();
+
+                console.log('[ImageCaptioner] Loading captioning model:', this.modelName);
+                const { pipeline } = this.transformers;
+
+                this.captioner = await pipeline('image-to-text', this.modelName);
+                console.log('[ImageCaptioner] ✓ Captioning model loaded');
+
+                this.ready = true;
+                return true;
+            } catch (err) {
+                console.error('[ImageCaptioner] ❌ Failed to load:', err);
+                this.ready = false;
+                return false;
+            } finally {
+                this.loading = false;
+            }
+        }
+
+        async generateCaption(imageSource) {
+            if (!this.ready) {
+                throw new Error('Captioner not initialized');
+            }
+
+            try {
+                let dataUrl;
+                if (imageSource instanceof HTMLCanvasElement) {
+                    dataUrl = imageSource.toDataURL('image/jpeg', 0.9);
+                } else if (typeof imageSource === 'string') {
+                    dataUrl = imageSource;
+                } else {
+                    throw new Error('Invalid image source');
+                }
+
+                const result = await this.captioner(dataUrl);
+                // Result is array of {generated_text: "..."}
+                const caption = result[0]?.generated_text || '';
+                return caption.trim();
+            } catch (err) {
+                console.error('[ImageCaptioner] Caption error:', err);
+                throw err;
+            }
+        }
+
+        // Capture current panorama view
+        capturePanoCanvas() {
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return null;
+
+            const captureCanvas = document.createElement('canvas');
+            const width = Math.min(canvas.width, 384);
+            const height = Math.min(canvas.height, 384);
+            captureCanvas.width = width;
+            captureCanvas.height = height;
+
+            const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
+            if (gl) {
+                const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+                gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width;
+                tempCanvas.height = canvas.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                const imageData = tempCtx.createImageData(canvas.width, canvas.height);
+
+                for (let y = 0; y < canvas.height; y++) {
+                    for (let x = 0; x < canvas.width; x++) {
+                        const srcIdx = (y * canvas.width + x) * 4;
+                        const dstIdx = ((canvas.height - 1 - y) * canvas.width + x) * 4;
+                        imageData.data[dstIdx] = pixels[srcIdx];
+                        imageData.data[dstIdx + 1] = pixels[srcIdx + 1];
+                        imageData.data[dstIdx + 2] = pixels[srcIdx + 2];
+                        imageData.data[dstIdx + 3] = pixels[srcIdx + 3];
+                    }
+                }
+                tempCtx.putImageData(imageData, 0, 0);
+
+                const ctx = captureCanvas.getContext('2d');
+                ctx.drawImage(tempCanvas, 0, 0, width, height);
+            } else {
+                const ctx = captureCanvas.getContext('2d');
+                ctx.drawImage(canvas, 0, 0, width, height);
+            }
+
+            return captureCanvas;
+        }
+    }
+
+    // ============================================
+    // FEATURE SERVICE UPDATER - Write attributes to ArcGIS
+    // ============================================
+    class FeatureServiceUpdater {
+        constructor(cellId) {
+            this.cellId = cellId;
+            this.baseUrl = `https://production.geocam.io/arcgis/rest/services/cell+${cellId}/FeatureServer/0`;
+        }
+
+        async updateShotAttribute(shotId, attributeName, value) {
+            const url = `${this.baseUrl}/updateFeatures`;
+
+            const features = [{
+                attributes: {
+                    id: shotId,
+                    [attributeName]: value
+                }
+            }];
+
+            const formData = new FormData();
+            formData.append('f', 'json');
+            formData.append('features', JSON.stringify(features));
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'include' // Include cookies for auth
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    throw new Error(result.error.message || 'Update failed');
+                }
+
+                if (result.updateResults?.[0]?.success) {
+                    console.log(`[FeatureService] ✓ Updated shot ${shotId}.${attributeName}`);
+                    return true;
+                } else {
+                    const error = result.updateResults?.[0]?.error;
+                    throw new Error(error?.description || 'Update failed');
+                }
+            } catch (err) {
+                console.error(`[FeatureService] ❌ Failed to update shot ${shotId}:`, err);
+                throw err;
+            }
+        }
+
+        async batchUpdateAttribute(updates) {
+            // updates = [{shotId, value}, ...]
+            const url = `${this.baseUrl}/updateFeatures`;
+
+            const features = updates.map(u => ({
+                attributes: {
+                    id: u.shotId,
+                    smol: u.value
+                }
+            }));
+
+            const formData = new FormData();
+            formData.append('f', 'json');
+            formData.append('features', JSON.stringify(features));
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'include'
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    throw new Error(result.error.message || 'Batch update failed');
+                }
+
+                const successCount = result.updateResults?.filter(r => r.success).length || 0;
+                console.log(`[FeatureService] ✓ Batch updated ${successCount}/${updates.length} shots`);
+                return result;
+            } catch (err) {
+                console.error('[FeatureService] ❌ Batch update failed:', err);
+                throw err;
+            }
+        }
+    }
+
+    // ============================================
     // PHONE FISHEYE LOCALIZATION CLASS
     // ============================================
     class PhoneFisheyeLocalization {
@@ -1734,7 +1943,9 @@
             this.estimatedFov = 70;
             this.isMatching = false;
             this.matcher = new FeatureMatcher();
-            this.embedder = new VisionEmbedder(); // Add vision embedder
+            this.embedder = new VisionEmbedder();
+            this.captioner = new ImageCaptioner(); // Add image captioner for ML descriptions
+            this.featureUpdater = null; // Initialized when cellId is known
             this.matchCanvas = null;
             this.lastHomography = null;
             this.lastResult = null;
@@ -2385,6 +2596,19 @@
                     <button class="pf-clear-cache-btn" style="font-size: 9px; padding: 2px 6px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 3px; cursor: pointer;">Clear Cache</button>
                 </div>
 
+                <hr style="margin: 12px 0; border: none; border-top: 1px solid #e0e0e0;">
+                <h4 style="margin: 0 0 8px 0; font-size: 12px;">🤖 ML Shot Descriptions</h4>
+                <button class="pf-btn pf-btn-secondary pf-generate-descriptions-btn" style="background: #00897b; width: 100%;">
+                    📝 Generate Descriptions (smol)
+                </button>
+                <button class="pf-btn pf-btn-secondary pf-cancel-descriptions-btn" style="display: none; background: #f44336; color: white;">
+                    ✕ Cancel Generation
+                </button>
+                <div class="pf-description-status" style="display: none; font-size: 10px; color: #666; margin-top: 4px;">
+                    <span class="pf-desc-progress">0/0 shots</span>
+                    <span class="pf-desc-current" style="display: block; margin-top: 2px;"></span>
+                </div>
+
                 <div class="pf-batch-results" style="display:none; margin-top: 12px; max-height: 200px; overflow-y: auto;">
                     <h5 style="margin: 0 0 8px 0; font-size: 12px;">Best Matches:</h5>
                     <div class="pf-batch-list"></div>
@@ -2553,6 +2777,18 @@
                 this.searchCancelled = true;
                 this.showStatus('Cancelling search...', 'loading');
                 console.log('[PhoneFisheye] Search cancelled by user');
+            });
+
+            // Generate descriptions button
+            this.descriptionCancelled = false;
+            this.panel.querySelector('.pf-generate-descriptions-btn').addEventListener('click', () => {
+                this.generateAllDescriptions();
+            });
+
+            this.panel.querySelector('.pf-cancel-descriptions-btn').addEventListener('click', () => {
+                this.descriptionCancelled = true;
+                this.showStatus('Cancelling description generation...', 'loading');
+                console.log('[PhoneFisheye] Description generation cancelled by user');
             });
 
             // Overlay controls
@@ -3507,6 +3743,179 @@
                 this.showStatus(`Search failed: ${err.message}`, 'error');
             } finally {
                 this.isMatching = false;
+            }
+        }
+
+        // ============================================
+        // GENERATE ML DESCRIPTIONS FOR ALL SHOTS
+        // ============================================
+        async generateAllDescriptions() {
+            if (this.isMatching) {
+                this.showStatus('Another operation in progress', 'error');
+                return;
+            }
+
+            this.isMatching = true;
+            this.descriptionCancelled = false;
+
+            const generateBtn = this.panel.querySelector('.pf-generate-descriptions-btn');
+            const cancelBtn = this.panel.querySelector('.pf-cancel-descriptions-btn');
+            const statusDiv = this.panel.querySelector('.pf-description-status');
+            const progressSpan = this.panel.querySelector('.pf-desc-progress');
+            const currentSpan = this.panel.querySelector('.pf-desc-current');
+
+            generateBtn.style.display = 'none';
+            cancelBtn.style.display = 'block';
+            statusDiv.style.display = 'block';
+
+            try {
+                // Initialize captioner
+                this.showStatus('Loading image captioning model...', 'loading');
+                progressSpan.textContent = 'Loading model...';
+
+                const captionerReady = await this.captioner.initialize();
+                if (!captionerReady) {
+                    throw new Error('Failed to load captioning model');
+                }
+
+                this.showStatus('✓ Captioning model loaded', 'success');
+
+                // Get cell ID
+                if (!this.cellId) {
+                    const urlMatch = window.location.href.match(/cell[+\s]([a-z0-9+]+)/i);
+                    if (urlMatch) this.cellId = urlMatch[1];
+                }
+
+                if (!this.cellId) {
+                    throw new Error('Could not determine cell ID');
+                }
+
+                // Initialize feature updater
+                this.featureUpdater = new FeatureServiceUpdater(this.cellId);
+
+                // Fetch all shots
+                this.showStatus('Fetching shot list...', 'loading');
+
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${this.cellId}/FeatureServer/0/query`;
+                const queryParams = new URLSearchParams({
+                    f: 'json',
+                    where: '1=1',
+                    outFields: 'id,smol',
+                    returnGeometry: 'false',
+                    orderByFields: 'id ASC',
+                    resultRecordCount: '5000'
+                });
+
+                const response = await fetch(`${featureUrl}?${queryParams}`);
+                const data = await response.json();
+
+                if (!data.features || data.features.length === 0) {
+                    throw new Error('No shots found in cell');
+                }
+
+                // Filter to shots without smol description
+                const allShots = data.features.map(f => ({
+                    id: f.attributes.id,
+                    smol: f.attributes.smol
+                }));
+
+                const shotsNeedingDescription = allShots.filter(s => !s.smol || s.smol.trim() === '');
+
+                console.log(`[GenerateDescriptions] ${shotsNeedingDescription.length}/${allShots.length} shots need descriptions`);
+
+                if (shotsNeedingDescription.length === 0) {
+                    this.showStatus('All shots already have descriptions!', 'success');
+                    return;
+                }
+
+                progressSpan.textContent = `0/${shotsNeedingDescription.length} shots`;
+
+                // Save current view
+                const originalParams = new URLSearchParams(window.location.hash.substring(1));
+                const originalShot = originalParams.get('shot');
+
+                // Process each shot
+                const batchSize = 10; // Update feature service every N shots
+                let pendingUpdates = [];
+                let successCount = 0;
+                let failCount = 0;
+
+                for (let i = 0; i < shotsNeedingDescription.length; i++) {
+                    if (this.descriptionCancelled) {
+                        console.log(`[GenerateDescriptions] Cancelled at ${i}/${shotsNeedingDescription.length}`);
+                        break;
+                    }
+
+                    const shot = shotsNeedingDescription[i];
+
+                    // Navigate to shot
+                    const params = new URLSearchParams(window.location.hash.substring(1));
+                    params.set('shot', shot.id);
+                    params.set('fov', '80'); // Wide FOV to see more context
+                    window.location.hash = params.toString();
+
+                    await this.delay(500); // Wait for view to load
+
+                    try {
+                        // Capture and generate description
+                        const canvas = this.captioner.capturePanoCanvas();
+                        if (!canvas) {
+                            throw new Error('Failed to capture view');
+                        }
+
+                        const description = await this.captioner.generateCaption(canvas);
+                        console.log(`[GenerateDescriptions] Shot ${shot.id}: "${description}"`);
+
+                        pendingUpdates.push({ shotId: shot.id, value: description });
+                        successCount++;
+
+                        currentSpan.textContent = `Shot ${shot.id}: "${description.substring(0, 50)}${description.length > 50 ? '...' : ''}"`;
+
+                    } catch (err) {
+                        console.error(`[GenerateDescriptions] Error on shot ${shot.id}:`, err);
+                        failCount++;
+                    }
+
+                    // Update progress
+                    progressSpan.textContent = `${i + 1}/${shotsNeedingDescription.length} shots (${successCount} ✓, ${failCount} ✗)`;
+
+                    // Batch update to feature service
+                    if (pendingUpdates.length >= batchSize || i === shotsNeedingDescription.length - 1) {
+                        if (pendingUpdates.length > 0) {
+                            try {
+                                await this.featureUpdater.batchUpdateAttribute(pendingUpdates);
+                                console.log(`[GenerateDescriptions] Saved batch of ${pendingUpdates.length} descriptions`);
+                            } catch (err) {
+                                console.error('[GenerateDescriptions] Failed to save batch:', err);
+                            }
+                            pendingUpdates = [];
+                        }
+                    }
+                }
+
+                // Navigate back to original shot
+                if (originalShot) {
+                    const params = new URLSearchParams(window.location.hash.substring(1));
+                    params.set('shot', originalShot);
+                    window.location.hash = params.toString();
+                }
+
+                const message = this.descriptionCancelled
+                    ? `Cancelled. Generated ${successCount} descriptions.`
+                    : `Done! Generated ${successCount} descriptions, ${failCount} failed.`;
+
+                this.showStatus(message, successCount > 0 ? 'success' : 'error');
+                progressSpan.textContent = message;
+                currentSpan.textContent = '';
+
+            } catch (err) {
+                console.error('[GenerateDescriptions] Error:', err);
+                this.showStatus(`Failed: ${err.message}`, 'error');
+            } finally {
+                this.isMatching = false;
+                this.descriptionCancelled = false;
+                generateBtn.style.display = 'block';
+                cancelBtn.style.display = 'none';
             }
         }
 
