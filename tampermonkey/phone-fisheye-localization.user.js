@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      6.0.0
-// @description  Multi-view matching with spherical coordinate tracking, neighbor shots, and AKAZE/ORB hybrid detection
+// @version      7.0.0
+// @description  Match visualization with FOV cone, rays on map, 10K features, and correspondence lines
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -515,6 +515,23 @@
             margin-bottom: 12px;
         }
 
+        /* Match lines canvas for showing correspondences */
+        .pf-match-lines-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 9997;
+        }
+
+        /* Phone preview with keypoints */
+        .pf-phone-keypoints-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+
         .pf-cv-status.ready {
             background: #e6f4ea;
             color: #137333;
@@ -647,8 +664,8 @@
                 console.log('[FeatureMatcher] OpenCV loaded');
                 this.cvReady = true;
 
-                // ORB: Fast but less invariant
-                this.orb = new cv.ORB(5000);
+                // ORB: Cranked up to 10000 features for more matches
+                this.orb = new cv.ORB(10000);
                 this.bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
 
                 // AKAZE: Better for cross-domain matching (like MegaLoc uses)
@@ -846,7 +863,7 @@
                 this.bf.knnMatch(desc1, desc2, knnMatches, 2);
 
                 const goodMatches = [];
-                const ratioThresh = 0.75; // Lowe's ratio
+                const ratioThresh = 0.85; // Lowe's ratio (relaxed for more matches)
 
                 for (let i = 0; i < knnMatches.size(); i++) {
                     const matchPair = knnMatches.get(i);
@@ -1132,6 +1149,8 @@
             this.inlierIndices = null;
             this.matchStatsEl = null;
             this.showKeypoints = true;
+            this.showMatchLines = true;
+            this.matchLinesCanvas = null;
 
             // SPHERICAL COORDINATE STORAGE for view-invariant keypoints
             this.sphericalKeypoints = null; // Array of {azimuth, elevation, isInlier}
@@ -1178,6 +1197,7 @@
             this.createOverlay();
             this.createKeypointCanvas();
             this.createMatchStats();
+            this.createMatchLinesCanvas();
 
             this.updateCvStatus('loading', 'Loading OpenCV.js...');
             const cvLoaded = await this.matcher.init();
@@ -1196,7 +1216,7 @@
             // Try to get shot coordinates from URL
             this.fetchShotCoordinates();
 
-            console.log('[PhoneFisheye] Initialized v6.0 - Spherical tracking + Multi-view + AKAZE');
+            console.log('[PhoneFisheye] Initialized v7.0 - FOV cone, rays, match lines, 10K features');
         }
 
         createKeypointCanvas() {
@@ -1214,6 +1234,96 @@
                 Inliers: <span class="inlier-count">0</span>
             `;
             document.body.appendChild(this.matchStatsEl);
+        }
+
+        createMatchLinesCanvas() {
+            this.matchLinesCanvas = document.createElement('canvas');
+            this.matchLinesCanvas.className = 'pf-match-lines-canvas';
+            this.matchLinesCanvas.style.display = 'none';
+            document.body.appendChild(this.matchLinesCanvas);
+        }
+
+        // Draw lines connecting matched keypoints from phone preview to pano
+        drawMatchLines() {
+            if (!this.matchLinesCanvas || !this.matchedPoints || !this.sphericalKeypoints) return;
+
+            const panoCanvas = document.querySelector('canvas');
+            const phonePreview = this.panel?.querySelector('.pf-preview-img');
+            if (!panoCanvas || !phonePreview) return;
+
+            const panoRect = panoCanvas.getBoundingClientRect();
+            const phoneRect = phonePreview.getBoundingClientRect();
+
+            // Size the match lines canvas to cover the whole screen
+            this.matchLinesCanvas.width = window.innerWidth;
+            this.matchLinesCanvas.height = window.innerHeight;
+            this.matchLinesCanvas.style.display = 'block';
+
+            const ctx = this.matchLinesCanvas.getContext('2d');
+            ctx.clearRect(0, 0, this.matchLinesCanvas.width, this.matchLinesCanvas.height);
+
+            if (!this.currentViewParams) return;
+
+            // Get phone image scale
+            const phoneScaleX = phoneRect.width / (this.phoneImage?.width || 1);
+            const phoneScaleY = phoneRect.height / (this.phoneImage?.height || 1);
+
+            // Draw match lines (only inliers for clarity)
+            let lineCount = 0;
+            const maxLines = 50; // Limit for performance
+
+            for (let i = 0; i < this.sphericalKeypoints.length && lineCount < maxLines; i++) {
+                const sphericalKp = this.sphericalKeypoints[i];
+                if (!sphericalKp.isInlier) continue;
+
+                // Get pano position from spherical
+                const panoPos = this.sphericalToScreen(
+                    sphericalKp.azimuth, sphericalKp.elevation,
+                    panoRect.width, panoRect.height,
+                    this.currentViewParams
+                );
+                if (!panoPos) continue;
+
+                // Get phone position from matched points
+                const phoneKp = this.matchedPoints[i];
+                if (!phoneKp) continue;
+
+                const panoX = panoRect.left + panoPos.x;
+                const panoY = panoRect.top + panoPos.y;
+                const phoneX = phoneRect.left + phoneKp.phone.x * phoneScaleX;
+                const phoneY = phoneRect.top + phoneKp.phone.y * phoneScaleY;
+
+                // Draw line with gradient
+                const gradient = ctx.createLinearGradient(phoneX, phoneY, panoX, panoY);
+                gradient.addColorStop(0, 'rgba(255, 152, 0, 0.8)'); // Orange at phone
+                gradient.addColorStop(1, 'rgba(76, 175, 80, 0.8)'); // Green at pano
+
+                ctx.beginPath();
+                ctx.moveTo(phoneX, phoneY);
+                ctx.lineTo(panoX, panoY);
+                ctx.strokeStyle = gradient;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+
+                // Draw dots at endpoints
+                ctx.beginPath();
+                ctx.arc(phoneX, phoneY, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#ff9800';
+                ctx.fill();
+
+                ctx.beginPath();
+                ctx.arc(panoX, panoY, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#4caf50';
+                ctx.fill();
+
+                lineCount++;
+            }
+        }
+
+        hideMatchLines() {
+            if (this.matchLinesCanvas) {
+                this.matchLinesCanvas.style.display = 'none';
+            }
         }
 
         setupViewObserver() {
@@ -1653,6 +1763,9 @@
                     <button class="pf-btn pf-btn-secondary pf-toggle-keypoints-btn">
                         ${ICONS.eye} Hide Keypoints
                     </button>
+                    <button class="pf-btn pf-btn-secondary pf-toggle-lines-btn">
+                        ${ICONS.eye} Hide Lines
+                    </button>
                     <button class="pf-btn pf-btn-success pf-add-marker-btn">
                         ${ICONS.mapPin} Add Map Marker
                     </button>
@@ -1752,6 +1865,7 @@
 
             this.panel.querySelector('.pf-toggle-overlay-btn').addEventListener('click', () => this.toggleOverlay());
             this.panel.querySelector('.pf-toggle-keypoints-btn').addEventListener('click', () => this.toggleKeypoints());
+            this.panel.querySelector('.pf-toggle-lines-btn').addEventListener('click', () => this.toggleMatchLines());
             this.panel.querySelector('.pf-add-marker-btn').addEventListener('click', () => this.addMapMarker());
 
             // Distance slider
@@ -1772,6 +1886,23 @@
                 btn.innerHTML = `${ICONS.eye} Hide Keypoints`;
             } else {
                 btn.innerHTML = `${ICONS.eyeOff} Show Keypoints`;
+            }
+        }
+
+        toggleMatchLines() {
+            this.showMatchLines = !this.showMatchLines;
+            if (this.matchLinesCanvas) {
+                if (this.showMatchLines) {
+                    this.drawMatchLines();
+                } else {
+                    this.hideMatchLines();
+                }
+            }
+            const btn = this.panel.querySelector('.pf-toggle-lines-btn');
+            if (this.showMatchLines) {
+                btn.innerHTML = `${ICONS.eye} Hide Lines`;
+            } else {
+                btn.innerHTML = `${ICONS.eyeOff} Show Lines`;
             }
         }
 
@@ -1852,6 +1983,10 @@
                 const ctx = this.keypointCanvas.getContext('2d');
                 ctx.clearRect(0, 0, this.keypointCanvas.width, this.keypointCanvas.height);
             }
+
+            // Hide match lines
+            this.hideMatchLines();
+            this.sphericalKeypoints = null;
 
             // Hide match stats
             if (this.matchStatsEl) {
@@ -2020,6 +2155,9 @@
                 this.panel.querySelector('.pf-overlay-controls').classList.add('visible');
                 this.showStatus('Localization complete!', 'success');
                 this.showProgress(100);
+
+                // Draw match lines from phone preview to pano keypoints
+                this.drawMatchLines();
 
                 // Cleanup OpenCV mats
                 this.matcher.cleanup([phoneMat, panoMat, phoneFeatures.descriptors, panoFeatures.descriptors]);
@@ -2597,14 +2735,16 @@
             const phonePos = this.estimatePhonePosition();
 
             // Load ArcGIS modules
-            const [GraphicsLayer, Graphic, Point, SimpleMarkerSymbol, SimpleLineSymbol, Polyline] = await new Promise((resolve, reject) => {
+            const [GraphicsLayer, Graphic, Point, SimpleMarkerSymbol, SimpleLineSymbol, Polyline, Polygon, SimpleFillSymbol] = await new Promise((resolve, reject) => {
                 require([
                     'esri/layers/GraphicsLayer',
                     'esri/Graphic',
                     'esri/geometry/Point',
                     'esri/symbols/SimpleMarkerSymbol',
                     'esri/symbols/SimpleLineSymbol',
-                    'esri/geometry/Polyline'
+                    'esri/geometry/Polyline',
+                    'esri/geometry/Polygon',
+                    'esri/symbols/SimpleFillSymbol'
                 ], (...modules) => resolve(modules), reject);
             });
 
@@ -2630,8 +2770,72 @@
                 spatialReference: { wkid: 4326 }
             });
 
-            // If we have phone position, draw a line from phone to geocam
+            // GeoCam position
+            const geocamPoint = new Point({
+                longitude: this.shotCoordinates.x,
+                latitude: this.shotCoordinates.y,
+                spatialReference: { wkid: 4326 }
+            });
+
+            // Add GeoCam marker (blue)
+            const geocamMarker = new Graphic({
+                geometry: geocamPoint,
+                symbol: {
+                    type: 'simple-marker',
+                    style: 'diamond',
+                    color: [33, 150, 243, 0.9],
+                    size: 14,
+                    outline: { color: [255, 255, 255], width: 2 }
+                },
+                attributes: { type: 'geocam-position' }
+            });
+            this.arcgisGraphicsLayer.add(geocamMarker);
+
+            // If we have phone position, draw FOV cone and sight line
             if (phonePos) {
+                // PHONE FOV CONE - show field of view as a wedge
+                const phoneFov = this.estimatedFov || 70;
+                const fovDistance = phonePos.distance * 1.5; // Extend cone beyond geocam
+                const phoneHeading = phonePos.heading; // Direction phone is facing
+
+                // Calculate FOV cone edges
+                const leftAngle = (phoneHeading - phoneFov / 2) * Math.PI / 180;
+                const rightAngle = (phoneHeading + phoneFov / 2) * Math.PI / 180;
+
+                // Convert to lat/lng offsets (meters to degrees)
+                const metersPerDegreeLat = 111000;
+                const metersPerDegreeLng = 111000 * Math.cos(markerLat * Math.PI / 180);
+
+                const leftEndLng = markerLng + (fovDistance * Math.sin(leftAngle)) / metersPerDegreeLng;
+                const leftEndLat = markerLat + (fovDistance * Math.cos(leftAngle)) / metersPerDegreeLat;
+                const rightEndLng = markerLng + (fovDistance * Math.sin(rightAngle)) / metersPerDegreeLng;
+                const rightEndLat = markerLat + (fovDistance * Math.cos(rightAngle)) / metersPerDegreeLat;
+
+                // Create FOV cone polygon
+                const fovCone = new Polygon({
+                    rings: [[
+                        [markerLng, markerLat],
+                        [leftEndLng, leftEndLat],
+                        [rightEndLng, rightEndLat],
+                        [markerLng, markerLat]
+                    ]],
+                    spatialReference: { wkid: 4326 }
+                });
+
+                const fovConeGraphic = new Graphic({
+                    geometry: fovCone,
+                    symbol: {
+                        type: 'simple-fill',
+                        color: [255, 152, 0, 0.25], // Semi-transparent orange
+                        outline: {
+                            color: [255, 152, 0, 0.8],
+                            width: 1.5
+                        }
+                    }
+                });
+                this.arcgisGraphicsLayer.add(fovConeGraphic);
+
+                // Sight line from phone to geocam
                 const sightLine = new Polyline({
                     paths: [[
                         [phonePos.x, phonePos.y],
@@ -2640,26 +2844,58 @@
                     spatialReference: { wkid: 4326 }
                 });
 
-                const lineSymbol = {
-                    type: 'simple-line',
-                    color: [255, 87, 34, 0.6],
-                    width: 2,
-                    style: 'dash'
-                };
-
                 const lineGraphic = new Graphic({
                     geometry: sightLine,
-                    symbol: lineSymbol
+                    symbol: {
+                        type: 'simple-line',
+                        color: [76, 175, 80, 0.9],
+                        width: 3,
+                        style: 'solid'
+                    }
                 });
-
                 this.arcgisGraphicsLayer.add(lineGraphic);
+
+                // Draw rays from geocam to inlier match directions
+                if (this.sphericalKeypoints) {
+                    const rayLength = 30; // meters
+                    let rayCount = 0;
+                    const maxRays = 20;
+
+                    for (const kp of this.sphericalKeypoints) {
+                        if (!kp.isInlier || rayCount >= maxRays) continue;
+
+                        // Convert spherical coords to direction
+                        const azRad = kp.azimuth * Math.PI / 180;
+                        const rayEndLng = this.shotCoordinates.x + (rayLength * Math.sin(azRad)) / metersPerDegreeLng;
+                        const rayEndLat = this.shotCoordinates.y + (rayLength * Math.cos(azRad)) / metersPerDegreeLat;
+
+                        const ray = new Polyline({
+                            paths: [[
+                                [this.shotCoordinates.x, this.shotCoordinates.y],
+                                [rayEndLng, rayEndLat]
+                            ]],
+                            spatialReference: { wkid: 4326 }
+                        });
+
+                        const rayGraphic = new Graphic({
+                            geometry: ray,
+                            symbol: {
+                                type: 'simple-line',
+                                color: [255, 235, 59, 0.6], // Yellow
+                                width: 1
+                            }
+                        });
+                        this.arcgisGraphicsLayer.add(rayGraphic);
+                        rayCount++;
+                    }
+                }
             }
 
             // Create a distinctive phone marker symbol
             const symbol = {
                 type: 'simple-marker',
                 style: 'circle',
-                color: [255, 87, 34, 0.8], // Orange
+                color: [255, 87, 34, 0.9],
                 size: 16,
                 outline: {
                     color: [255, 255, 255],
@@ -2672,7 +2908,7 @@
                 type: 'simple-marker',
                 style: 'circle',
                 color: [255, 87, 34, 0.2],
-                size: 32,
+                size: 36,
                 outline: {
                     color: [255, 87, 34, 0.5],
                     width: 2
@@ -2701,9 +2937,10 @@
                 popupTemplate: {
                     title: 'Phone Photo Location',
                     content: `
-                        <p><strong>Phone Position:</strong> ${markerLat.toFixed(6)}, ${markerLng.toFixed(6)}</p>
-                        <p><strong>GeoCam Position:</strong> ${this.shotCoordinates.y.toFixed(6)}, ${this.shotCoordinates.x.toFixed(6)}</p>
+                        <p><strong>Phone XY:</strong> ${markerLng.toFixed(6)}, ${markerLat.toFixed(6)}</p>
+                        <p><strong>GeoCam XY:</strong> ${this.shotCoordinates.x.toFixed(6)}, ${this.shotCoordinates.y.toFixed(6)}</p>
                         <p><strong>Est. Distance:</strong> ${phonePos ? phonePos.distance.toFixed(1) + 'm' : 'N/A'}</p>
+                        <p><strong>Phone FOV:</strong> ${this.estimatedFov}°</p>
                         <p><strong>Phone Facing:</strong> ${this.lastResult?.facing.toFixed(1)}°</p>
                         <p><strong>Matches:</strong> ${this.lastResult?.matches} (${this.lastResult?.inliers} inliers)</p>
                         <p><strong>Confidence:</strong> ${(this.lastResult?.confidence * 100).toFixed(0)}%</p>
