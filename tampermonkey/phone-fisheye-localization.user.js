@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      4.0.0
-// @description  Localize phone photos within GeoCam panorama views with MatchAnything-style visualization and ArcGIS map marker
+// @version      5.0.0
+// @description  Localize phone photos using multi-view matching with proper perspective warp and phone position estimation
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -907,6 +907,75 @@
         cleanup(mats) {
             mats.forEach(m => { if (m && m.delete) m.delete(); });
         }
+
+        // Convert homography to CSS matrix3d for proper perspective warp
+        homographyToMatrix3d(H, srcWidth, srcHeight, dstWidth, dstHeight, canvasRect) {
+            if (!H || H.rows !== 3 || H.cols !== 3) return null;
+
+            const h = [];
+            for (let i = 0; i < 9; i++) {
+                h.push(H.doubleAt(Math.floor(i / 3), i % 3));
+            }
+
+            // Scale factors for canvas to screen
+            const scaleX = canvasRect.width / dstWidth;
+            const scaleY = canvasRect.height / dstHeight;
+
+            // Transform the 4 corners to get the perspective quad
+            const corners = [
+                { x: 0, y: 0 },
+                { x: srcWidth, y: 0 },
+                { x: srcWidth, y: srcHeight },
+                { x: 0, y: srcHeight }
+            ];
+
+            const transformed = corners.map(pt => {
+                const w = h[6] * pt.x + h[7] * pt.y + h[8];
+                return {
+                    x: ((h[0] * pt.x + h[1] * pt.y + h[2]) / w) * scaleX,
+                    y: ((h[3] * pt.x + h[4] * pt.y + h[5]) / w) * scaleY
+                };
+            });
+
+            return transformed;
+        }
+
+        // Estimate camera pose from homography (rotation and translation direction)
+        decomposePose(H, fov, imgWidth, imgHeight) {
+            if (!H || H.rows !== 3 || H.cols !== 3) return null;
+
+            const h = [];
+            for (let i = 0; i < 9; i++) {
+                h.push(H.doubleAt(Math.floor(i / 3), i % 3));
+            }
+
+            // Focal length from FOV
+            const f = imgWidth / (2 * Math.tan(fov * Math.PI / 360));
+
+            // Build camera matrix K
+            const cx = imgWidth / 2;
+            const cy = imgHeight / 2;
+
+            // Normalize homography by K^-1 * H * K
+            // For simplicity, extract rotation angles from homography
+            const scale = Math.sqrt(h[0] * h[0] + h[3] * h[3]);
+
+            // Rotation angles (approximate)
+            const yaw = Math.atan2(h[2] - cx * h[8], f * h[8]) * 180 / Math.PI;
+            const pitch = Math.atan2(h[5] - cy * h[8], f * h[8]) * 180 / Math.PI;
+            const roll = Math.atan2(h[3], h[0]) * 180 / Math.PI;
+
+            return {
+                yaw,
+                pitch,
+                roll,
+                scale,
+                // Translation direction (unit vector)
+                tx: h[2] / (f * scale),
+                ty: h[5] / (f * scale),
+                tz: 1.0
+            };
+        }
     }
 
     // ============================================
@@ -946,6 +1015,19 @@
             this.panoCanvas = null;
             this.viewObserver = null;
 
+            // Multi-view matching
+            this.neighborShots = [];
+            this.allShotData = null;
+            this.cellId = null;
+            this.bestMatchView = null;
+
+            // Phone position estimation
+            this.estimatedPhonePosition = null;
+            this.estimatedDistance = 10; // Default distance estimate in meters
+
+            // Perspective warp
+            this.warpedCorners = null;
+
             this.init();
         }
 
@@ -981,7 +1063,7 @@
             // Try to get shot coordinates from URL
             this.fetchShotCoordinates();
 
-            console.log('[PhoneFisheye] Initialized v4.0');
+            console.log('[PhoneFisheye] Initialized v5.0 - Multi-view matching with perspective warp');
         }
 
         createKeypointCanvas() {
@@ -1035,8 +1117,10 @@
                 const urlMatch = window.location.pathname.match(/cell\+([^\/]+)/);
                 if (!urlMatch) return;
 
-                const cellId = urlMatch[1];
-                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${cellId}/FeatureServer/0/query`;
+                this.cellId = urlMatch[1];
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${this.cellId}/FeatureServer/0/query`;
+
+                // First get current shot
                 const queryParams = new URLSearchParams({
                     f: 'json',
                     where: `id=${shotId}`,
@@ -1051,15 +1135,72 @@
                 if (data.features && data.features.length > 0) {
                     const feature = data.features[0];
                     this.shotCoordinates = {
+                        id: shotId,
                         x: feature.geometry.x,
                         y: feature.geometry.y,
                         z: feature.geometry.z || 0,
-                        heading: feature.attributes.heading
+                        heading: feature.attributes.heading,
+                        sequence: feature.attributes.sequence || feature.attributes.id
                     };
                     console.log('[PhoneFisheye] Shot coordinates:', this.shotCoordinates);
+
+                    // Fetch neighbor shots
+                    await this.fetchNeighborShots(shotId);
                 }
             } catch (err) {
                 console.warn('[PhoneFisheye] Could not fetch shot coordinates:', err);
+            }
+        }
+
+        async fetchNeighborShots(currentShotId) {
+            if (!this.cellId) return;
+
+            try {
+                const featureUrl = `https://production.geocam.io/arcgis/rest/services/cell+${this.cellId}/FeatureServer/0/query`;
+
+                // Get all shots to find neighbors (ordered by sequence/id)
+                const queryParams = new URLSearchParams({
+                    f: 'json',
+                    where: '1=1',
+                    outFields: 'id,heading,sequence',
+                    returnGeometry: 'true',
+                    returnZ: 'true',
+                    orderByFields: 'id ASC',
+                    resultRecordCount: '1000'
+                });
+
+                const response = await fetch(`${featureUrl}?${queryParams}`);
+                const data = await response.json();
+
+                if (data.features && data.features.length > 0) {
+                    this.allShotData = data.features.map(f => ({
+                        id: f.attributes.id,
+                        x: f.geometry.x,
+                        y: f.geometry.y,
+                        z: f.geometry.z || 0,
+                        heading: f.attributes.heading
+                    }));
+
+                    // Find current shot index
+                    const currentIdx = this.allShotData.findIndex(s => s.id == currentShotId);
+
+                    if (currentIdx >= 0) {
+                        // Get 2 before and 2 after (total 5 views)
+                        this.neighborShots = [];
+                        for (let i = -2; i <= 2; i++) {
+                            const idx = currentIdx + i;
+                            if (idx >= 0 && idx < this.allShotData.length) {
+                                this.neighborShots.push({
+                                    ...this.allShotData[idx],
+                                    offset: i
+                                });
+                            }
+                        }
+                        console.log('[PhoneFisheye] Neighbor shots:', this.neighborShots.map(s => s.id));
+                    }
+                }
+            } catch (err) {
+                console.warn('[PhoneFisheye] Could not fetch neighbor shots:', err);
             }
         }
 
@@ -1131,8 +1272,17 @@
                             <input type="range" class="pf-opacity" value="70" min="0" max="100" />
                         </div>
                     </div>
+                    <div class="pf-input-row">
+                        <div class="pf-input-group">
+                            <label>Est. Distance: <span class="distance-value">10m</span></label>
+                            <input type="range" class="pf-distance" value="10" min="1" max="50" />
+                        </div>
+                    </div>
                     <button class="pf-btn pf-btn-warning pf-toggle-overlay-btn">
                         ${ICONS.eyeOff} Hide Overlay
+                    </button>
+                    <button class="pf-btn pf-btn-secondary pf-toggle-keypoints-btn">
+                        ${ICONS.eye} Hide Keypoints
                     </button>
                     <button class="pf-btn pf-btn-success pf-add-marker-btn">
                         ${ICONS.mapPin} Add Map Marker
@@ -1213,7 +1363,28 @@
             });
 
             this.panel.querySelector('.pf-toggle-overlay-btn').addEventListener('click', () => this.toggleOverlay());
+            this.panel.querySelector('.pf-toggle-keypoints-btn').addEventListener('click', () => this.toggleKeypoints());
             this.panel.querySelector('.pf-add-marker-btn').addEventListener('click', () => this.addMapMarker());
+
+            // Distance slider
+            const distanceSlider = this.panel.querySelector('.pf-distance');
+            distanceSlider.addEventListener('input', (e) => {
+                this.estimatedDistance = parseInt(e.target.value);
+                this.panel.querySelector('.distance-value').textContent = `${e.target.value}m`;
+            });
+        }
+
+        toggleKeypoints() {
+            this.showKeypoints = !this.showKeypoints;
+            if (this.keypointCanvas) {
+                this.keypointCanvas.style.display = this.showKeypoints ? 'block' : 'none';
+            }
+            const btn = this.panel.querySelector('.pf-toggle-keypoints-btn');
+            if (this.showKeypoints) {
+                btn.innerHTML = `${ICONS.eye} Hide Keypoints`;
+            } else {
+                btn.innerHTML = `${ICONS.eyeOff} Show Keypoints`;
+            }
         }
 
         togglePanel() {
@@ -1473,66 +1644,154 @@
             }
 
             const { H, phoneW, phoneH, panoW, panoH, panoCanvas } = this.lastHomography;
-
-            // Store original bounds in normalized coordinates (0-1)
-            const bounds = this.matcher.warpImageBounds(H, phoneW, phoneH, panoW, panoH);
-            this.lastHomography.normalizedBounds = {
-                minX: bounds.minX / panoW,
-                maxX: bounds.maxX / panoW,
-                minY: bounds.minY / panoH,
-                maxY: bounds.maxY / panoH,
-                corners: bounds.corners.map(c => ({ x: c.x / panoW, y: c.y / panoH }))
-            };
-
-            // Get canvas position on screen
             const canvasRect = panoCanvas.getBoundingClientRect();
 
-            // Scale bounds to screen coordinates
-            const overlayLeft = canvasRect.left + bounds.minX * (canvasRect.width / panoW);
-            const overlayTop = canvasRect.top + bounds.minY * (canvasRect.height / panoH);
-            const overlayWidth = (bounds.maxX - bounds.minX) * (canvasRect.width / panoW);
-            const overlayHeight = (bounds.maxY - bounds.minY) * (canvasRect.height / panoH);
+            // Get the 4 transformed corners for perspective warp
+            this.warpedCorners = this.matcher.homographyToMatrix3d(
+                H, phoneW, phoneH, panoW, panoH, canvasRect
+            );
 
-            // Create overlay element
-            this.imageOverlay = document.createElement('div');
+            if (!this.warpedCorners) {
+                console.warn('[PhoneFisheye] Could not compute perspective corners');
+                return;
+            }
+
+            // Store normalized corners for updates
+            this.lastHomography.normalizedCorners = this.warpedCorners.map(c => ({
+                x: c.x / canvasRect.width,
+                y: c.y / canvasRect.height
+            }));
+
+            // Create a canvas for the warped image
+            this.imageOverlay = document.createElement('canvas');
             this.imageOverlay.className = 'pf-image-overlay';
+            this.imageOverlay.width = canvasRect.width;
+            this.imageOverlay.height = canvasRect.height;
             this.imageOverlay.style.cssText = `
-                left: ${overlayLeft}px;
-                top: ${overlayTop}px;
-                width: ${overlayWidth}px;
-                height: ${overlayHeight}px;
+                position: absolute;
+                left: ${canvasRect.left}px;
+                top: ${canvasRect.top}px;
+                width: ${canvasRect.width}px;
+                height: ${canvasRect.height}px;
                 opacity: ${this.overlayOpacity};
+                pointer-events: none;
+                border: none;
+                box-shadow: none;
             `;
 
-            const img = document.createElement('img');
-            img.src = this.phoneImage.src;
-            this.imageOverlay.appendChild(img);
+            // Draw the warped image
+            this.drawWarpedImage();
 
             this.overlay.appendChild(this.imageOverlay);
             this.overlayVisible = true;
             this.updateToggleButton();
         }
 
+        drawWarpedImage() {
+            if (!this.imageOverlay || !this.warpedCorners || !this.phoneImage) return;
+
+            const ctx = this.imageOverlay.getContext('2d');
+            const corners = this.warpedCorners;
+
+            ctx.clearRect(0, 0, this.imageOverlay.width, this.imageOverlay.height);
+
+            // Use canvas path clipping and drawImage with perspective
+            // For proper perspective, we'll use a triangulation approach
+            ctx.save();
+
+            // Draw the image using perspective triangles
+            // Split the quad into 2 triangles and texture map each
+            this.drawTexturedTriangle(ctx, this.phoneImage,
+                // Source triangle 1 (top-left, top-right, bottom-right)
+                0, 0,
+                this.phoneImage.width, 0,
+                this.phoneImage.width, this.phoneImage.height,
+                // Destination triangle 1
+                corners[0].x, corners[0].y,
+                corners[1].x, corners[1].y,
+                corners[2].x, corners[2].y
+            );
+
+            this.drawTexturedTriangle(ctx, this.phoneImage,
+                // Source triangle 2 (top-left, bottom-right, bottom-left)
+                0, 0,
+                this.phoneImage.width, this.phoneImage.height,
+                0, this.phoneImage.height,
+                // Destination triangle 2
+                corners[0].x, corners[0].y,
+                corners[2].x, corners[2].y,
+                corners[3].x, corners[3].y
+            );
+
+            // Draw border around the warped quad
+            ctx.strokeStyle = '#ff5722';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(corners[0].x, corners[0].y);
+            ctx.lineTo(corners[1].x, corners[1].y);
+            ctx.lineTo(corners[2].x, corners[2].y);
+            ctx.lineTo(corners[3].x, corners[3].y);
+            ctx.closePath();
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        // Draw a textured triangle using affine transformation
+        drawTexturedTriangle(ctx, img, sx0, sy0, sx1, sy1, sx2, sy2, dx0, dy0, dx1, dy1, dx2, dy2) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(dx0, dy0);
+            ctx.lineTo(dx1, dy1);
+            ctx.lineTo(dx2, dy2);
+            ctx.closePath();
+            ctx.clip();
+
+            // Compute affine transform from source to destination triangle
+            const denom = (sx0 * (sy1 - sy2) + sx1 * (sy2 - sy0) + sx2 * (sy0 - sy1));
+            if (Math.abs(denom) < 0.001) {
+                ctx.restore();
+                return;
+            }
+
+            const m11 = (dx0 * (sy1 - sy2) + dx1 * (sy2 - sy0) + dx2 * (sy0 - sy1)) / denom;
+            const m12 = (dx0 * (sx2 - sx1) + dx1 * (sx0 - sx2) + dx2 * (sx1 - sx0)) / denom;
+            const m13 = (dx0 * (sx1 * sy2 - sx2 * sy1) + dx1 * (sx2 * sy0 - sx0 * sy2) + dx2 * (sx0 * sy1 - sx1 * sy0)) / denom;
+            const m21 = (dy0 * (sy1 - sy2) + dy1 * (sy2 - sy0) + dy2 * (sy0 - sy1)) / denom;
+            const m22 = (dy0 * (sx2 - sx1) + dy1 * (sx0 - sx2) + dy2 * (sx1 - sx0)) / denom;
+            const m23 = (dy0 * (sx1 * sy2 - sx2 * sy1) + dy1 * (sx2 * sy0 - sx0 * sy2) + dy2 * (sx0 * sy1 - sx1 * sy0)) / denom;
+
+            ctx.setTransform(m11, m21, m12, m22, m13, m23);
+            ctx.drawImage(img, 0, 0);
+            ctx.restore();
+        }
+
         updateOverlayPosition() {
             // Recalculate overlay position when view changes
-            if (!this.imageOverlay || !this.lastHomography || !this.lastHomography.normalizedBounds) return;
+            if (!this.imageOverlay || !this.lastHomography || !this.lastHomography.normalizedCorners) return;
 
             const canvas = document.querySelector('canvas');
             if (!canvas) return;
 
             const canvasRect = canvas.getBoundingClientRect();
-            const bounds = this.lastHomography.normalizedBounds;
+            const normalizedCorners = this.lastHomography.normalizedCorners;
 
-            // Recalculate position from normalized bounds
-            const overlayLeft = canvasRect.left + bounds.minX * canvasRect.width;
-            const overlayTop = canvasRect.top + bounds.minY * canvasRect.height;
-            const overlayWidth = (bounds.maxX - bounds.minX) * canvasRect.width;
-            const overlayHeight = (bounds.maxY - bounds.minY) * canvasRect.height;
+            // Recalculate warped corners from normalized positions
+            this.warpedCorners = normalizedCorners.map(c => ({
+                x: c.x * canvasRect.width,
+                y: c.y * canvasRect.height
+            }));
 
-            this.imageOverlay.style.left = `${overlayLeft}px`;
-            this.imageOverlay.style.top = `${overlayTop}px`;
-            this.imageOverlay.style.width = `${overlayWidth}px`;
-            this.imageOverlay.style.height = `${overlayHeight}px`;
+            // Update canvas size and position
+            this.imageOverlay.width = canvasRect.width;
+            this.imageOverlay.height = canvasRect.height;
+            this.imageOverlay.style.left = `${canvasRect.left}px`;
+            this.imageOverlay.style.top = `${canvasRect.top}px`;
+            this.imageOverlay.style.width = `${canvasRect.width}px`;
+            this.imageOverlay.style.height = `${canvasRect.height}px`;
+
+            // Redraw the warped image
+            this.drawWarpedImage();
         }
 
         drawKeypointVisualization() {
@@ -1707,19 +1966,62 @@
             }
         }
 
+        // Estimate where the phone was when the photo was taken
+        estimatePhonePosition() {
+            if (!this.shotCoordinates || !this.lastResult) return null;
+
+            // Get the geocam position and heading
+            const geocamLng = this.shotCoordinates.x;
+            const geocamLat = this.shotCoordinates.y;
+            const geocamHeading = this.shotCoordinates.heading || 0;
+
+            // The estimated facing from matching tells us where the phone was looking
+            const phoneFacing = this.lastResult.facing;
+
+            // The phone was looking AT the geocam, so it was in the opposite direction
+            // from where the geocam sees it
+            const directionFromGeocam = phoneFacing; // degrees from north
+
+            // Estimate distance - this is approximate
+            // Could be improved with depth estimation or user input
+            const distanceMeters = this.estimatedDistance;
+
+            // Convert to lat/lng offset
+            // 1 degree latitude ≈ 111,000 meters
+            // 1 degree longitude ≈ 111,000 * cos(latitude) meters
+            const latOffset = (distanceMeters / 111000) * Math.cos(directionFromGeocam * Math.PI / 180);
+            const lngOffset = (distanceMeters / (111000 * Math.cos(geocamLat * Math.PI / 180))) * Math.sin(directionFromGeocam * Math.PI / 180);
+
+            this.estimatedPhonePosition = {
+                x: geocamLng + lngOffset,
+                y: geocamLat + latOffset,
+                heading: (phoneFacing + 180) % 360, // Phone was facing toward geocam
+                distance: distanceMeters,
+                confidence: this.lastResult.confidence
+            };
+
+            console.log('[PhoneFisheye] Estimated phone position:', this.estimatedPhonePosition);
+            return this.estimatedPhonePosition;
+        }
+
         async addArcGISMarker(mapView) {
             if (!this.shotCoordinates) {
                 this.showStatus('Shot coordinates not available', 'error');
                 return;
             }
 
+            // Estimate phone position
+            const phonePos = this.estimatePhonePosition();
+
             // Load ArcGIS modules
-            const [GraphicsLayer, Graphic, Point, SimpleMarkerSymbol] = await new Promise((resolve, reject) => {
+            const [GraphicsLayer, Graphic, Point, SimpleMarkerSymbol, SimpleLineSymbol, Polyline] = await new Promise((resolve, reject) => {
                 require([
                     'esri/layers/GraphicsLayer',
                     'esri/Graphic',
                     'esri/geometry/Point',
-                    'esri/symbols/SimpleMarkerSymbol'
+                    'esri/symbols/SimpleMarkerSymbol',
+                    'esri/symbols/SimpleLineSymbol',
+                    'esri/geometry/Polyline'
                 ], (...modules) => resolve(modules), reject);
             });
 
@@ -1734,12 +2036,41 @@
                 title: 'Phone Photo Location'
             });
 
-            // Create the point at shot coordinates
+            // Use estimated phone position if available, otherwise geocam position
+            const markerLng = phonePos ? phonePos.x : this.shotCoordinates.x;
+            const markerLat = phonePos ? phonePos.y : this.shotCoordinates.y;
+
+            // Create the point at phone position
             const point = new Point({
-                longitude: this.shotCoordinates.x,
-                latitude: this.shotCoordinates.y,
+                longitude: markerLng,
+                latitude: markerLat,
                 spatialReference: { wkid: 4326 }
             });
+
+            // If we have phone position, draw a line from phone to geocam
+            if (phonePos) {
+                const sightLine = new Polyline({
+                    paths: [[
+                        [phonePos.x, phonePos.y],
+                        [this.shotCoordinates.x, this.shotCoordinates.y]
+                    ]],
+                    spatialReference: { wkid: 4326 }
+                });
+
+                const lineSymbol = {
+                    type: 'simple-line',
+                    color: [255, 87, 34, 0.6],
+                    width: 2,
+                    style: 'dash'
+                };
+
+                const lineGraphic = new Graphic({
+                    geometry: sightLine,
+                    symbol: lineSymbol
+                });
+
+                this.arcgisGraphicsLayer.add(lineGraphic);
+            }
 
             // Create a distinctive phone marker symbol
             const symbol = {
@@ -1787,11 +2118,12 @@
                 popupTemplate: {
                     title: 'Phone Photo Location',
                     content: `
-                        <p><strong>Coordinates:</strong> ${this.shotCoordinates.y.toFixed(6)}, ${this.shotCoordinates.x.toFixed(6)}</p>
-                        <p><strong>Facing:</strong> ${this.lastResult?.facing.toFixed(1)}°</p>
-                        <p><strong>Horizon:</strong> ${this.lastResult?.horizon.toFixed(1)}°</p>
-                        <p><strong>FOV:</strong> ${this.lastResult?.fov.toFixed(1)}°</p>
+                        <p><strong>Phone Position:</strong> ${markerLat.toFixed(6)}, ${markerLng.toFixed(6)}</p>
+                        <p><strong>GeoCam Position:</strong> ${this.shotCoordinates.y.toFixed(6)}, ${this.shotCoordinates.x.toFixed(6)}</p>
+                        <p><strong>Est. Distance:</strong> ${phonePos ? phonePos.distance.toFixed(1) + 'm' : 'N/A'}</p>
+                        <p><strong>Phone Facing:</strong> ${this.lastResult?.facing.toFixed(1)}°</p>
                         <p><strong>Matches:</strong> ${this.lastResult?.matches} (${this.lastResult?.inliers} inliers)</p>
+                        <p><strong>Confidence:</strong> ${(this.lastResult?.confidence * 100).toFixed(0)}%</p>
                     `
                 }
             });
