@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      5.0.0
+// @version      5.1.0
 // @description  Localize phone photos using multi-view matching with proper perspective warp and phone position estimation
 // @author       GeoCam
 // @match        https://production.geocam.io/*
@@ -643,8 +643,10 @@
             if (cv.getBuildInformation) {
                 console.log('[FeatureMatcher] OpenCV loaded');
                 this.cvReady = true;
-                this.orb = new cv.ORB(2000);
-                this.bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+                // Increase features for better matching (was 2000)
+                this.orb = new cv.ORB(5000);
+                // Use knnMatch for ratio test (not cross-check)
+                this.bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
                 return true;
             }
             return false;
@@ -687,6 +689,19 @@
 
             const imageData = ctx.getImageData(0, 0, width, height);
             return { mat: cv.matFromImageData(imageData), width, height };
+        }
+
+        // Load a panorama image from URL
+        async loadPanoImage(shotId, cellId) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error(`Failed to load shot ${shotId}`));
+                // GeoCam pano URL format - need to find the correct calibration/source
+                // For now, we'll capture from the viewer canvas when navigating
+                img.src = `https://manager.geocam.xyz/shot/${shotId}/pano.jpg`;
+            });
         }
 
         capturePanoramaView() {
@@ -733,23 +748,44 @@
 
         matchFeatures(desc1, desc2) {
             if (desc1.rows === 0 || desc2.rows === 0) return [];
-            const matches = new cv.DMatchVector();
+
             try {
-                this.bf.match(desc1, desc2, matches);
+                // Use knnMatch with k=2 for Lowe's ratio test
+                const knnMatches = new cv.DMatchVectorVector();
+                this.bf.knnMatch(desc1, desc2, knnMatches, 2);
+
+                const goodMatches = [];
+                const ratioThresh = 0.75; // Lowe's ratio
+
+                for (let i = 0; i < knnMatches.size(); i++) {
+                    const matchPair = knnMatches.get(i);
+                    if (matchPair.size() >= 2) {
+                        const m = matchPair.get(0);
+                        const n = matchPair.get(1);
+                        // Apply ratio test
+                        if (m.distance < ratioThresh * n.distance) {
+                            goodMatches.push(m);
+                        }
+                    } else if (matchPair.size() === 1) {
+                        // Only one match found, keep if distance is low
+                        const m = matchPair.get(0);
+                        if (m.distance < 50) {
+                            goodMatches.push(m);
+                        }
+                    }
+                }
+
+                knnMatches.delete();
+                goodMatches.sort((a, b) => a.distance - b.distance);
+                return goodMatches;
             } catch (e) {
                 console.error('[FeatureMatcher] Matching error:', e);
                 return [];
             }
-            const matchArray = [];
-            for (let i = 0; i < matches.size(); i++) {
-                matchArray.push(matches.get(i));
-            }
-            matchArray.sort((a, b) => a.distance - b.distance);
-            matches.delete();
-            return matchArray;
         }
 
         filterMatches(matches) {
+            // Already filtered by ratio test, just apply distance threshold
             if (matches.length < 10) return matches;
             const distances = matches.map(m => m.distance).sort((a, b) => a - b);
             const medianDist = distances[Math.floor(distances.length / 2)];
@@ -1063,7 +1099,7 @@
             // Try to get shot coordinates from URL
             this.fetchShotCoordinates();
 
-            console.log('[PhoneFisheye] Initialized v5.0 - Multi-view matching with perspective warp');
+            console.log('[PhoneFisheye] Initialized v5.1 - Enhanced matching with ratio test');
         }
 
         createKeypointCanvas() {
@@ -1304,7 +1340,8 @@
                 </div>
 
                 <div class="pf-help">
-                    ORB features + RANSAC homography<br>Image overlay + map marker
+                    5000 ORB features + Lowe's ratio test<br>
+                    RANSAC homography + perspective warp
                 </div>
             `;
 
