@@ -2099,31 +2099,50 @@
         }
 
         drawWarpedImage() {
-            if (!this.imageOverlay || !this.warpedCorners || !this.phoneImage) return;
+            if (!this.imageOverlay || !this.phoneImage || !this.lastHomography) return;
 
             const ctx = this.imageOverlay.getContext('2d');
-            const corners = this.warpedCorners;
-
             ctx.clearRect(0, 0, this.imageOverlay.width, this.imageOverlay.height);
-
-            // Use SUBDIVIDED triangles for better perspective rendering
-            // More subdivisions = better approximation of perspective warp
-            const subdivisions = 8; // 8x8 grid of quads = much smoother warp
 
             const img = this.phoneImage;
             const imgW = img.width;
             const imgH = img.height;
+            const { H, panoW, panoH } = this.lastHomography;
 
-            // Bilinear interpolation helper
-            const lerp = (a, b, t) => a + (b - a) * t;
-            const bilinear = (tl, tr, bl, br, u, v) => ({
-                x: lerp(lerp(tl.x, tr.x, u), lerp(bl.x, br.x, u), v),
-                y: lerp(lerp(tl.y, tr.y, u), lerp(bl.y, br.y, u), v)
-            });
+            // If we don't have homography, fall back to corner-based warp
+            if (!H || !H.rows) {
+                if (this.warpedCorners) this.drawWarpedImageFromCorners();
+                return;
+            }
+
+            // Get the homography matrix values
+            const h = [];
+            for (let i = 0; i < 9; i++) {
+                h.push(H.doubleAt(Math.floor(i / 3), i % 3));
+            }
+
+            // Scale factors from pano coords to canvas
+            const canvasW = this.imageOverlay.width;
+            const canvasH = this.imageOverlay.height;
+            const scaleX = canvasW / panoW;
+            const scaleY = canvasH / panoH;
+
+            // Transform a point from phone image to panorama canvas coords
+            const transformPoint = (px, py) => {
+                const w = h[6] * px + h[7] * py + h[8];
+                if (Math.abs(w) < 0.0001) return null;
+                return {
+                    x: ((h[0] * px + h[1] * py + h[2]) / w) * scaleX,
+                    y: ((h[3] * px + h[4] * py + h[5]) / w) * scaleY
+                };
+            };
+
+            // Use a finer grid for smoother warping (like MatchAnything)
+            const subdivisions = 20;
 
             ctx.save();
 
-            // Draw subdivided quads
+            // Draw subdivided quads using actual homography transform
             for (let i = 0; i < subdivisions; i++) {
                 for (let j = 0; j < subdivisions; j++) {
                     const u0 = i / subdivisions;
@@ -2131,17 +2150,24 @@
                     const v0 = j / subdivisions;
                     const v1 = (j + 1) / subdivisions;
 
-                    // Source quad corners (in image space)
+                    // Source quad corners (in phone image space)
                     const sx0 = u0 * imgW, sy0 = v0 * imgH;
                     const sx1 = u1 * imgW, sy1 = v0 * imgH;
                     const sx2 = u1 * imgW, sy2 = v1 * imgH;
                     const sx3 = u0 * imgW, sy3 = v1 * imgH;
 
-                    // Destination quad corners (bilinear interpolation of warped corners)
-                    const d0 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v0);
-                    const d1 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v0);
-                    const d2 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v1);
-                    const d3 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v1);
+                    // Transform each corner using homography
+                    const d0 = transformPoint(sx0, sy0);
+                    const d1 = transformPoint(sx1, sy1);
+                    const d2 = transformPoint(sx2, sy2);
+                    const d3 = transformPoint(sx3, sy3);
+
+                    // Skip if any point is invalid
+                    if (!d0 || !d1 || !d2 || !d3) continue;
+
+                    // Skip if quad is too large or outside canvas
+                    const maxDim = Math.max(canvasW, canvasH);
+                    if (Math.abs(d1.x - d0.x) > maxDim || Math.abs(d2.y - d0.y) > maxDim) continue;
 
                     // Draw two triangles for this quad
                     this.drawTexturedTriangle(ctx, img,
@@ -2155,9 +2181,81 @@
                 }
             }
 
-            // Draw border around the warped quad
-            ctx.strokeStyle = '#ff5722';
-            ctx.lineWidth = 3;
+            // Draw border around the warped quad (green dashed like MatchAnything)
+            const corners = [
+                transformPoint(0, 0),
+                transformPoint(imgW, 0),
+                transformPoint(imgW, imgH),
+                transformPoint(0, imgH)
+            ].filter(c => c !== null);
+
+            if (corners.length === 4) {
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(corners[0].x, corners[0].y);
+                ctx.lineTo(corners[1].x, corners[1].y);
+                ctx.lineTo(corners[2].x, corners[2].y);
+                ctx.lineTo(corners[3].x, corners[3].y);
+                ctx.closePath();
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            ctx.restore();
+        }
+
+        // Fallback method using corner interpolation (when view changes)
+        drawWarpedImageFromCorners() {
+            if (!this.warpedCorners || !this.phoneImage) return;
+
+            const ctx = this.imageOverlay.getContext('2d');
+            const corners = this.warpedCorners;
+            const img = this.phoneImage;
+            const imgW = img.width;
+            const imgH = img.height;
+
+            const subdivisions = 12;
+            const lerp = (a, b, t) => a + (b - a) * t;
+            const bilinear = (tl, tr, bl, br, u, v) => ({
+                x: lerp(lerp(tl.x, tr.x, u), lerp(bl.x, br.x, u), v),
+                y: lerp(lerp(tl.y, tr.y, u), lerp(bl.y, br.y, u), v)
+            });
+
+            ctx.save();
+
+            for (let i = 0; i < subdivisions; i++) {
+                for (let j = 0; j < subdivisions; j++) {
+                    const u0 = i / subdivisions;
+                    const u1 = (i + 1) / subdivisions;
+                    const v0 = j / subdivisions;
+                    const v1 = (j + 1) / subdivisions;
+
+                    const sx0 = u0 * imgW, sy0 = v0 * imgH;
+                    const sx1 = u1 * imgW, sy1 = v0 * imgH;
+                    const sx2 = u1 * imgW, sy2 = v1 * imgH;
+                    const sx3 = u0 * imgW, sy3 = v1 * imgH;
+
+                    const d0 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v0);
+                    const d1 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v0);
+                    const d2 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v1);
+                    const d3 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v1);
+
+                    this.drawTexturedTriangle(ctx, img,
+                        sx0, sy0, sx1, sy1, sx2, sy2,
+                        d0.x, d0.y, d1.x, d1.y, d2.x, d2.y
+                    );
+                    this.drawTexturedTriangle(ctx, img,
+                        sx0, sy0, sx2, sy2, sx3, sy3,
+                        d0.x, d0.y, d2.x, d2.y, d3.x, d3.y
+                    );
+                }
+            }
+
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
             ctx.beginPath();
             ctx.moveTo(corners[0].x, corners[0].y);
             ctx.lineTo(corners[1].x, corners[1].y);
@@ -2165,6 +2263,7 @@
             ctx.lineTo(corners[3].x, corners[3].y);
             ctx.closePath();
             ctx.stroke();
+            ctx.setLineDash([]);
 
             ctx.restore();
         }
