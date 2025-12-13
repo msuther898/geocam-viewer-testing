@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.3.0
-// @description  CLIP filter + inlier-weighted scoring (inliers primary, CLIP secondary)
+// @version      8.4.0
+// @description  Add detailed search results panel with per-shot tracking
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -609,6 +609,153 @@
             .pf-close { color: #aaa; }
             .pf-close:hover { color: #eee; }
             .pf-cv-status { background: #2a2a2a; color: #aaa; }
+        }
+
+        /* Detailed Search Results Panel */
+        .pf-detailed-results {
+            display: none;
+            margin-top: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #fafafa;
+            max-height: 400px;
+            overflow: hidden;
+        }
+
+        .pf-detailed-results.visible {
+            display: block;
+        }
+
+        .pf-detailed-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            background: #f0f0f0;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .pf-detailed-header:hover {
+            background: #e8e8e8;
+        }
+
+        .pf-detailed-toggle {
+            font-size: 10px;
+            color: #666;
+        }
+
+        .pf-detailed-summary {
+            display: flex;
+            gap: 12px;
+            padding: 8px 12px;
+            font-size: 11px;
+            border-bottom: 1px solid #e0e0e0;
+            background: #fff;
+            flex-wrap: wrap;
+        }
+
+        .pf-summary-stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .pf-summary-stat .stat-icon {
+            width: 14px;
+            height: 14px;
+        }
+
+        .pf-summary-stat.success { color: #4caf50; }
+        .pf-summary-stat.warning { color: #ff9800; }
+        .pf-summary-stat.error { color: #f44336; }
+        .pf-summary-stat.info { color: #2196f3; }
+
+        .pf-detailed-content {
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .pf-detailed-content.expanded {
+            display: block;
+        }
+
+        .pf-shot-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 12px;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 10px;
+            gap: 8px;
+        }
+
+        .pf-shot-row:hover {
+            background: #f5f5f5;
+        }
+
+        .pf-shot-row.match {
+            background: #e8f5e9;
+        }
+
+        .pf-shot-row.rejected {
+            background: #fff8e1;
+        }
+
+        .pf-shot-row.failed {
+            background: #ffebee;
+        }
+
+        .pf-shot-id {
+            font-weight: 600;
+            min-width: 70px;
+        }
+
+        .pf-shot-status {
+            min-width: 60px;
+        }
+
+        .pf-shot-status.matched {
+            color: #4caf50;
+            font-weight: 600;
+        }
+
+        .pf-shot-status.rejected {
+            color: #ff9800;
+        }
+
+        .pf-shot-status.failed {
+            color: #f44336;
+        }
+
+        .pf-shot-metrics {
+            display: flex;
+            gap: 8px;
+            flex: 1;
+            justify-content: flex-end;
+        }
+
+        .pf-shot-metric {
+            padding: 2px 6px;
+            background: #f0f0f0;
+            border-radius: 3px;
+            font-size: 9px;
+        }
+
+        .pf-shot-metric.clip { background: #e3f2fd; color: #1976d2; }
+        .pf-shot-metric.orb { background: #e8f5e9; color: #388e3c; }
+        .pf-shot-metric.inliers { background: #fff3e0; color: #f57c00; }
+
+        .pf-shot-reason {
+            font-size: 9px;
+            color: #888;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
     `;
 
@@ -2171,6 +2318,15 @@
                     <div class="pf-batch-list"></div>
                 </div>
 
+                <div class="pf-detailed-results">
+                    <div class="pf-detailed-header">
+                        <span>📊 Detailed Search Results</span>
+                        <span class="pf-detailed-toggle">▼ Expand</span>
+                    </div>
+                    <div class="pf-detailed-summary"></div>
+                    <div class="pf-detailed-content"></div>
+                </div>
+
                 <button class="pf-btn pf-btn-secondary pf-navigate-btn" style="display:none">
                     ${ICONS.navigate} Navigate to Position
                 </button>
@@ -2281,6 +2437,14 @@
             // Update cache status on load
             this.updateCacheStatus();
             this.panel.querySelector('.pf-clear-btn').addEventListener('click', () => this.clearAll());
+
+            // Detailed results toggle
+            this.panel.querySelector('.pf-detailed-header').addEventListener('click', () => {
+                const content = this.panel.querySelector('.pf-detailed-content');
+                const toggle = this.panel.querySelector('.pf-detailed-toggle');
+                const isExpanded = content.classList.toggle('expanded');
+                toggle.textContent = isExpanded ? '▲ Collapse' : '▼ Expand';
+            });
 
             this.panel.querySelector('.pf-fov').addEventListener('change', (e) => {
                 this.estimatedFov = parseFloat(e.target.value) || 70;
@@ -2661,10 +2825,34 @@
             this.isMatching = true;
             this.batchResults = [];
 
+            // Initialize detailed tracking for ALL shots processed
+            this.detailedResults = {
+                clipStage: [],      // All shots processed in CLIP stage
+                orbStage: [],       // Shots sent to ORB verification
+                matched: [],        // Successfully matched shots
+                rejected: [],       // Rejected (not enough inliers, etc.)
+                failed: [],         // Failed to load/process
+                stats: {
+                    totalShots: 0,
+                    sampledForClip: 0,
+                    cachedEmbeddings: 0,
+                    computedEmbeddings: 0,
+                    clipFailed: 0,
+                    sentToOrb: 0,
+                    orbMatched: 0,
+                    orbRejected: 0,
+                    orbFailed: 0
+                }
+            };
+
             const batchResultsDiv = this.panel.querySelector('.pf-batch-results');
             const batchListDiv = this.panel.querySelector('.pf-batch-list');
+            const detailedResultsDiv = this.panel.querySelector('.pf-detailed-results');
+
             batchResultsDiv.style.display = 'block';
+            detailedResultsDiv.classList.add('visible');
             batchListDiv.innerHTML = '<div style="color: #666;">Starting search...</div>';
+            this.updateDetailedResultsSummary();
 
             try {
                 // STAGE 1: Initialize CLIP model
@@ -2743,6 +2931,11 @@
                 const sampleRate = Math.max(1, Math.floor(allShots.length / 150)); // ~150 samples for CLIP
                 const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
 
+                // Track stats
+                this.detailedResults.stats.totalShots = allShots.length;
+                this.detailedResults.stats.sampledForClip = sampledShots.length;
+                this.updateDetailedResultsSummary();
+
                 // Save current view
                 const originalParams = new URLSearchParams(window.location.hash.substring(1));
                 const originalShot = originalParams.get('shot');
@@ -2760,6 +2953,10 @@
                 const uncachedShots = sampledShots.filter(s => !cachedEmbeddings.has(s.id));
                 console.log(`[BatchSearch] Cache: ${cachedCount} cached, ${uncachedShots.length} to compute`);
 
+                // Track cache stats
+                this.detailedResults.stats.cachedEmbeddings = cachedCount;
+                this.updateDetailedResultsSummary();
+
                 batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: CLIP similarity<br/>📦 ${cachedCount} cached, 🔄 ${uncachedShots.length} to compute...</div>`;
 
                 const similarities = [];
@@ -2770,6 +2967,14 @@
                     if (cachedEmbedding) {
                         const similarity = this.embedder.cosineSimilarity(phoneEmbedding, cachedEmbedding);
                         similarities.push({ ...shot, similarity, cached: true });
+
+                        // Track in detailed results
+                        this.detailedResults.clipStage.push({
+                            shotId: shot.id,
+                            similarity: similarity,
+                            cached: true,
+                            status: 'success'
+                        });
                     }
                 }
 
@@ -2804,11 +3009,37 @@
 
                             const similarity = this.embedder.cosineSimilarity(phoneEmbedding, panoEmbedding);
                             similarities.push({ ...shot, similarity, cached: false });
+
+                            // Track computed embedding
+                            this.detailedResults.stats.computedEmbeddings++;
+                            this.detailedResults.clipStage.push({
+                                shotId: shot.id,
+                                similarity: similarity,
+                                cached: false,
+                                status: 'success'
+                            });
+                        } else {
+                            // Canvas capture failed
+                            this.detailedResults.stats.clipFailed++;
+                            this.detailedResults.failed.push({
+                                shotId: shot.id,
+                                stage: 'clip',
+                                reason: 'Canvas capture failed'
+                            });
                         }
                     } catch (e) {
                         console.warn(`[BatchSearch] CLIP error on shot ${shot.id}:`, e);
+                        this.detailedResults.stats.clipFailed++;
+                        this.detailedResults.failed.push({
+                            shotId: shot.id,
+                            stage: 'clip',
+                            reason: e.message || 'CLIP error'
+                        });
                     }
                 }
+
+                // Update summary after CLIP stage
+                this.updateDetailedResultsSummary();
 
                 // Log cache stats
                 const newCacheCount = await this.embedder.cache.getStats(this.cellId);
@@ -2852,6 +3083,9 @@
                 // STAGE 3: ORB verification on top candidates
                 this.showStatus('Stage 2: Geometric verification...', 'loading');
 
+                // Track ORB stage
+                this.detailedResults.stats.sentToOrb = topCandidates.length;
+
                 const { mat: phoneMat } = this.matcher.imageToMat(this.phoneImage, 600);
                 const phoneFeatures = this.matcher.extractFeatures(phoneMat, true);
 
@@ -2865,6 +3099,17 @@
                     this.showProgress(progress);
                     this.showStatus(`Verifying ${i + 1}/${topCandidates.length}: Shot ${shot.id}...`, 'loading');
 
+                    // Track this shot in ORB stage
+                    const orbEntry = {
+                        shotId: shot.id,
+                        clipSimilarity: shot.similarity,
+                        panoKeypoints: 0,
+                        matches: 0,
+                        inliers: 0,
+                        status: 'pending',
+                        reason: ''
+                    };
+
                     try {
                         // Navigate to shot
                         const params = new URLSearchParams(window.location.hash.substring(1));
@@ -2877,25 +3122,27 @@
                         // Capture and match with ORB
                         const { mat: panoMat } = this.matcher.capturePanoramaView();
                         const panoFeatures = this.matcher.extractFeatures(panoMat, true);
+                        orbEntry.panoKeypoints = panoFeatures.keypoints.size();
 
                         if (panoFeatures.keypoints.size() > 50) {
                             const matches = this.matcher.matchFeatures(
                                 phoneFeatures.descriptors, panoFeatures.descriptors
                             );
                             const goodMatches = this.matcher.filterMatches(matches);
+                            orbEntry.matches = goodMatches.length;
 
                             if (goodMatches.length >= 8) {
                                 const homResult = this.matcher.computeHomographyWithMask(
                                     phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
                                 );
 
+                                orbEntry.inliers = homResult?.inliers || 0;
+
                                 // Require minimum 15 inliers for a valid match
                                 if (homResult && homResult.inliers >= 15) {
                                     // INLIERS are PRIMARY - CLIP is just for filtering
-                                    // Inliers range: 15-200+, so weight heavily
-                                    // CLIP range: 0.85-0.95, so normalize as small bonus
-                                    const inlierScore = homResult.inliers * 2;  // Primary factor
-                                    const clipBonus = (shot.similarity - 0.8) * 50; // Small bonus for CLIP
+                                    const inlierScore = homResult.inliers * 2;
+                                    const clipBonus = (shot.similarity - 0.8) * 50;
                                     const combinedScore = inlierScore + clipBonus;
 
                                     console.log(`[BatchSearch] Shot ${shot.id}: ${homResult.inliers} inliers, ${(shot.similarity*100).toFixed(0)}% sim → score ${combinedScore.toFixed(1)}`);
@@ -2912,13 +3159,35 @@
                                         score: combinedScore
                                     });
 
+                                    // Track as matched
+                                    orbEntry.status = 'matched';
+                                    this.detailedResults.stats.orbMatched++;
+                                    this.detailedResults.matched.push(orbEntry);
+
                                     this.updateBatchResultsDisplay(batchListDiv);
-                                } else if (homResult) {
-                                    console.log(`[BatchSearch] Shot ${shot.id}: only ${homResult.inliers} inliers (need 15+)`);
+                                } else {
+                                    // Not enough inliers
+                                    orbEntry.status = 'rejected';
+                                    orbEntry.reason = `Only ${homResult?.inliers || 0} inliers (need 15+)`;
+                                    this.detailedResults.stats.orbRejected++;
+                                    this.detailedResults.rejected.push(orbEntry);
+                                    console.log(`[BatchSearch] Shot ${shot.id}: only ${homResult?.inliers || 0} inliers (need 15+)`);
                                 }
 
                                 if (homResult?.mask) homResult.mask.delete();
+                            } else {
+                                // Not enough matches
+                                orbEntry.status = 'rejected';
+                                orbEntry.reason = `Only ${goodMatches.length} matches (need 8+)`;
+                                this.detailedResults.stats.orbRejected++;
+                                this.detailedResults.rejected.push(orbEntry);
                             }
+                        } else {
+                            // Not enough keypoints
+                            orbEntry.status = 'rejected';
+                            orbEntry.reason = `Only ${orbEntry.panoKeypoints} keypoints (need 50+)`;
+                            this.detailedResults.stats.orbRejected++;
+                            this.detailedResults.rejected.push(orbEntry);
                         }
 
                         panoFeatures.keypoints.delete();
@@ -2927,7 +3196,19 @@
 
                     } catch (e) {
                         console.warn(`[BatchSearch] ORB error on shot ${shot.id}:`, e);
+                        orbEntry.status = 'failed';
+                        orbEntry.reason = e.message || 'ORB processing error';
+                        this.detailedResults.stats.orbFailed++;
+                        this.detailedResults.failed.push({
+                            shotId: shot.id,
+                            stage: 'orb',
+                            reason: e.message || 'ORB error'
+                        });
                     }
+
+                    // Add to orbStage tracking
+                    this.detailedResults.orbStage.push(orbEntry);
+                    this.updateDetailedResultsSummary();
                 }
 
                 // Sort by combined score
@@ -3145,6 +3426,134 @@
                     this.showStatus(`Navigated to shot ${shotId}`, 'info');
                 });
             });
+        }
+
+        // ============================================
+        // DETAILED RESULTS DISPLAY
+        // ============================================
+        updateDetailedResultsSummary() {
+            if (!this.detailedResults) return;
+
+            const summary = this.panel.querySelector('.pf-detailed-summary');
+            const content = this.panel.querySelector('.pf-detailed-content');
+            const stats = this.detailedResults.stats;
+
+            // Update summary stats
+            summary.innerHTML = `
+                <div class="pf-summary-stat info">
+                    📷 ${stats.totalShots} total
+                </div>
+                <div class="pf-summary-stat info">
+                    🔍 ${stats.sampledForClip} sampled
+                </div>
+                <div class="pf-summary-stat success">
+                    📦 ${stats.cachedEmbeddings} cached
+                </div>
+                <div class="pf-summary-stat info">
+                    🔄 ${stats.computedEmbeddings} computed
+                </div>
+                <div class="pf-summary-stat warning">
+                    ⚙️ ${stats.sentToOrb} to ORB
+                </div>
+                <div class="pf-summary-stat success">
+                    ✅ ${stats.orbMatched} matched
+                </div>
+                <div class="pf-summary-stat warning">
+                    ⚠️ ${stats.orbRejected} rejected
+                </div>
+                <div class="pf-summary-stat error">
+                    ❌ ${stats.clipFailed + stats.orbFailed} failed
+                </div>
+            `;
+
+            // Update detailed content with all shots
+            this.updateDetailedResultsContent(content);
+        }
+
+        updateDetailedResultsContent(container) {
+            if (!this.detailedResults) return;
+
+            let html = '';
+
+            // Matched shots (green)
+            if (this.detailedResults.matched.length > 0) {
+                html += `<div style="padding: 4px 12px; background: #e8f5e9; font-weight: 600; font-size: 10px; border-bottom: 1px solid #c8e6c9;">✅ MATCHED (${this.detailedResults.matched.length})</div>`;
+                this.detailedResults.matched.forEach(shot => {
+                    html += `
+                        <div class="pf-shot-row match">
+                            <span class="pf-shot-id">Shot ${shot.shotId}</span>
+                            <span class="pf-shot-status matched">MATCHED</span>
+                            <div class="pf-shot-metrics">
+                                <span class="pf-shot-metric clip">${(shot.clipSimilarity * 100).toFixed(0)}% CLIP</span>
+                                <span class="pf-shot-metric orb">${shot.matches} matches</span>
+                                <span class="pf-shot-metric inliers">${shot.inliers} inliers</span>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            // Rejected shots (yellow)
+            if (this.detailedResults.rejected.length > 0) {
+                html += `<div style="padding: 4px 12px; background: #fff8e1; font-weight: 600; font-size: 10px; border-bottom: 1px solid #ffecb3;">⚠️ REJECTED (${this.detailedResults.rejected.length})</div>`;
+                this.detailedResults.rejected.forEach(shot => {
+                    html += `
+                        <div class="pf-shot-row rejected">
+                            <span class="pf-shot-id">Shot ${shot.shotId}</span>
+                            <span class="pf-shot-status rejected">REJECTED</span>
+                            <div class="pf-shot-metrics">
+                                <span class="pf-shot-metric clip">${(shot.clipSimilarity * 100).toFixed(0)}% CLIP</span>
+                                ${shot.matches > 0 ? `<span class="pf-shot-metric orb">${shot.matches} matches</span>` : ''}
+                                ${shot.inliers > 0 ? `<span class="pf-shot-metric inliers">${shot.inliers} inliers</span>` : ''}
+                            </div>
+                            <span class="pf-shot-reason" title="${shot.reason}">${shot.reason}</span>
+                        </div>
+                    `;
+                });
+            }
+
+            // Failed shots (red)
+            if (this.detailedResults.failed.length > 0) {
+                html += `<div style="padding: 4px 12px; background: #ffebee; font-weight: 600; font-size: 10px; border-bottom: 1px solid #ffcdd2;">❌ FAILED (${this.detailedResults.failed.length})</div>`;
+                this.detailedResults.failed.forEach(shot => {
+                    html += `
+                        <div class="pf-shot-row failed">
+                            <span class="pf-shot-id">Shot ${shot.shotId}</span>
+                            <span class="pf-shot-status failed">FAILED</span>
+                            <span class="pf-shot-reason" title="${shot.reason}">[${shot.stage}] ${shot.reason}</span>
+                        </div>
+                    `;
+                });
+            }
+
+            // CLIP stage shots not sent to ORB (for reference)
+            const clipOnlyShots = this.detailedResults.clipStage.filter(
+                c => !this.detailedResults.orbStage.some(o => o.shotId === c.shotId)
+            );
+            if (clipOnlyShots.length > 0) {
+                html += `<div style="padding: 4px 12px; background: #e3f2fd; font-weight: 600; font-size: 10px; border-bottom: 1px solid #bbdefb;">📋 CLIP ONLY - Not in top 20 (${clipOnlyShots.length})</div>`;
+                // Show first 20 only to keep it manageable
+                clipOnlyShots.slice(0, 20).forEach(shot => {
+                    html += `
+                        <div class="pf-shot-row">
+                            <span class="pf-shot-id">Shot ${shot.shotId}</span>
+                            <span class="pf-shot-status" style="color: #1976d2;">CLIP only</span>
+                            <div class="pf-shot-metrics">
+                                <span class="pf-shot-metric clip">${(shot.similarity * 100).toFixed(0)}% CLIP</span>
+                            </div>
+                        </div>
+                    `;
+                });
+                if (clipOnlyShots.length > 20) {
+                    html += `<div style="padding: 4px 12px; font-size: 9px; color: #888;">... and ${clipOnlyShots.length - 20} more</div>`;
+                }
+            }
+
+            if (!html) {
+                html = '<div style="padding: 12px; color: #666; text-align: center;">Search in progress...</div>';
+            }
+
+            container.innerHTML = html;
         }
 
         createImageOverlay() {
