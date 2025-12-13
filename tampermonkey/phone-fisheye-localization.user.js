@@ -2159,6 +2159,9 @@
                 // Draw match lines from phone preview to pano keypoints
                 this.drawMatchLines();
 
+                // AUTO-ADD MAP MARKER with FOV cone and rays
+                this.addMapMarker();
+
                 // Cleanup OpenCV mats
                 this.matcher.cleanup([phoneMat, panoMat, phoneFeatures.descriptors, panoFeatures.descriptors]);
                 phoneFeatures.keypoints.delete();
@@ -3016,8 +3019,28 @@
         }
 
         showResults(result) {
+            // Get phone position for display
+            const phonePos = this.estimatePhonePosition();
+            const geocam = this.shotCoordinates;
+
             const content = this.panel.querySelector('.pf-results-content');
             content.innerHTML = `
+                <div class="pf-result-item">
+                    <span class="label">Phone XY</span>
+                    <span class="value" style="font-size: 11px;">${phonePos ? phonePos.x.toFixed(6) : 'N/A'}, ${phonePos ? phonePos.y.toFixed(6) : 'N/A'}</span>
+                </div>
+                <div class="pf-result-item">
+                    <span class="label">GeoCam XY</span>
+                    <span class="value" style="font-size: 11px;">${geocam ? geocam.x.toFixed(6) : 'N/A'}, ${geocam ? geocam.y.toFixed(6) : 'N/A'}</span>
+                </div>
+                <div class="pf-result-item">
+                    <span class="label">Distance</span>
+                    <span class="value">${phonePos ? phonePos.distance.toFixed(1) + 'm' : 'N/A'}</span>
+                </div>
+                <div class="pf-result-item">
+                    <span class="label">Phone FOV</span>
+                    <span class="value">${this.estimatedFov}°</span>
+                </div>
                 <div class="pf-result-item">
                     <span class="label">Facing</span>
                     <span class="value">${result.facing.toFixed(1)}°</span>
@@ -3025,10 +3048,6 @@
                 <div class="pf-result-item">
                     <span class="label">Horizon</span>
                     <span class="value">${result.horizon.toFixed(1)}°</span>
-                </div>
-                <div class="pf-result-item">
-                    <span class="label">FOV</span>
-                    <span class="value">${result.fov.toFixed(1)}°</span>
                 </div>
                 <div class="pf-result-item">
                     <span class="label">Matches</span>
