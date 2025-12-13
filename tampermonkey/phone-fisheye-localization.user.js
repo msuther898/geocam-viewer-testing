@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      5.1.0
-// @description  Localize phone photos using multi-view matching with proper perspective warp and phone position estimation
+// @version      6.0.0
+// @description  Multi-view matching with spherical coordinate tracking, neighbor shots, and AKAZE/ORB hybrid detection
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -631,7 +631,10 @@
         constructor() {
             this.cvReady = false;
             this.orb = null;
+            this.akaze = null;
             this.bf = null;
+            this.bfAkaze = null;
+            this.useAkaze = true; // AKAZE is better for cross-domain matching
         }
 
         async init() {
@@ -643,10 +646,22 @@
             if (cv.getBuildInformation) {
                 console.log('[FeatureMatcher] OpenCV loaded');
                 this.cvReady = true;
-                // Increase features for better matching (was 2000)
+
+                // ORB: Fast but less invariant
                 this.orb = new cv.ORB(5000);
-                // Use knnMatch for ratio test (not cross-check)
                 this.bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+
+                // AKAZE: Better for cross-domain matching (like MegaLoc uses)
+                // More robust to illumination and viewpoint changes
+                try {
+                    this.akaze = new cv.AKAZE();
+                    this.bfAkaze = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                    console.log('[FeatureMatcher] AKAZE initialized');
+                } catch (e) {
+                    console.warn('[FeatureMatcher] AKAZE not available, using ORB only');
+                    this.useAkaze = false;
+                }
+
                 return true;
             }
             return false;
@@ -736,14 +751,90 @@
             return { mat: cv.matFromImageData(imageData), width, height, canvas };
         }
 
-        extractFeatures(mat) {
+        extractFeatures(mat, forceOrb = false) {
             const gray = new cv.Mat();
             cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
             const keypoints = new cv.KeyPointVector();
             const descriptors = new cv.Mat();
-            this.orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+
+            // Use AKAZE for better cross-domain matching when available
+            if (this.useAkaze && this.akaze && !forceOrb) {
+                try {
+                    this.akaze.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                    console.log(`[FeatureMatcher] AKAZE: ${keypoints.size()} keypoints`);
+                } catch (e) {
+                    console.warn('[FeatureMatcher] AKAZE failed, falling back to ORB');
+                    this.orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                }
+            } else {
+                this.orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                console.log(`[FeatureMatcher] ORB: ${keypoints.size()} keypoints`);
+            }
+
             gray.delete();
-            return { keypoints, descriptors };
+            return { keypoints, descriptors, method: this.useAkaze ? 'AKAZE' : 'ORB' };
+        }
+
+        // Extract features at multiple scales for better matching
+        extractMultiScaleFeatures(mat) {
+            const allKeypoints = [];
+            const allDescriptors = [];
+            const scales = [1.0, 0.75, 0.5];
+
+            for (const scale of scales) {
+                let scaledMat = mat;
+                if (scale !== 1.0) {
+                    scaledMat = new cv.Mat();
+                    const newSize = new cv.Size(Math.round(mat.cols * scale), Math.round(mat.rows * scale));
+                    cv.resize(mat, scaledMat, newSize);
+                }
+
+                const { keypoints, descriptors } = this.extractFeatures(scaledMat);
+
+                // Scale keypoint coordinates back
+                for (let i = 0; i < keypoints.size(); i++) {
+                    const kp = keypoints.get(i);
+                    allKeypoints.push({
+                        x: kp.pt.x / scale,
+                        y: kp.pt.y / scale,
+                        size: kp.size / scale,
+                        angle: kp.angle,
+                        response: kp.response,
+                        scale: scale
+                    });
+                }
+
+                // Copy descriptors
+                if (descriptors.rows > 0) {
+                    for (let i = 0; i < descriptors.rows; i++) {
+                        const row = [];
+                        for (let j = 0; j < descriptors.cols; j++) {
+                            row.push(descriptors.ucharAt(i, j));
+                        }
+                        allDescriptors.push(row);
+                    }
+                }
+
+                if (scale !== 1.0) scaledMat.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+
+            // Convert back to OpenCV format
+            const kpVector = new cv.KeyPointVector();
+            for (const kp of allKeypoints) {
+                kpVector.push_back(new cv.KeyPoint(kp.x, kp.y, kp.size, kp.angle, kp.response));
+            }
+
+            const descMat = new cv.Mat(allDescriptors.length, allDescriptors[0]?.length || 32, cv.CV_8U);
+            for (let i = 0; i < allDescriptors.length; i++) {
+                for (let j = 0; j < allDescriptors[i].length; j++) {
+                    descMat.ucharPtr(i, j)[0] = allDescriptors[i][j];
+                }
+            }
+
+            console.log(`[FeatureMatcher] Multi-scale: ${kpVector.size()} total keypoints`);
+            return { keypoints: kpVector, descriptors: descMat };
         }
 
         matchFeatures(desc1, desc2) {
@@ -1042,6 +1133,10 @@
             this.matchStatsEl = null;
             this.showKeypoints = true;
 
+            // SPHERICAL COORDINATE STORAGE for view-invariant keypoints
+            this.sphericalKeypoints = null; // Array of {azimuth, elevation, isInlier}
+            this.currentViewParams = null; // {facing, horizon, fov}
+
             // New: ArcGIS integration
             this.arcgisGraphicsLayer = null;
             this.arcgisMapView = null;
@@ -1056,13 +1151,15 @@
             this.allShotData = null;
             this.cellId = null;
             this.bestMatchView = null;
+            this.multiViewResults = []; // Results from matching against multiple views
 
             // Phone position estimation
             this.estimatedPhonePosition = null;
             this.estimatedDistance = 10; // Default distance estimate in meters
 
-            // Perspective warp
+            // Perspective warp - using spherical corners
             this.warpedCorners = null;
+            this.sphericalCorners = null; // Corners in spherical coords for view updates
 
             this.init();
         }
@@ -1099,7 +1196,7 @@
             // Try to get shot coordinates from URL
             this.fetchShotCoordinates();
 
-            console.log('[PhoneFisheye] Initialized v5.1 - Enhanced matching with ratio test');
+            console.log('[PhoneFisheye] Initialized v6.0 - Spherical tracking + Multi-view + AKAZE');
         }
 
         createKeypointCanvas() {
@@ -1202,7 +1299,7 @@
                     returnGeometry: 'true',
                     returnZ: 'true',
                     orderByFields: 'id ASC',
-                    resultRecordCount: '1000'
+                    resultRecordCount: '2000' // Get more shots
                 });
 
                 const response = await fetch(`${featureUrl}?${queryParams}`);
@@ -1221,18 +1318,19 @@
                     const currentIdx = this.allShotData.findIndex(s => s.id == currentShotId);
 
                     if (currentIdx >= 0) {
-                        // Get 2 before and 2 after (total 5 views)
+                        // Get 5 before and 5 after (total 11 views for multi-view matching)
                         this.neighborShots = [];
-                        for (let i = -2; i <= 2; i++) {
+                        for (let i = -5; i <= 5; i++) {
                             const idx = currentIdx + i;
                             if (idx >= 0 && idx < this.allShotData.length) {
                                 this.neighborShots.push({
                                     ...this.allShotData[idx],
-                                    offset: i
+                                    offset: i,
+                                    isCurrent: i === 0
                                 });
                             }
                         }
-                        console.log('[PhoneFisheye] Neighbor shots:', this.neighborShots.map(s => s.id));
+                        console.log('[PhoneFisheye] Neighbor shots:', this.neighborShots.map(s => `${s.id}(${s.offset})`));
                     }
                 }
             } catch (err) {
@@ -1240,9 +1338,229 @@
             }
         }
 
+        // Navigate to a specific shot for multi-view matching
+        async navigateToShot(shotId, heading = null) {
+            const params = new URLSearchParams(window.location.hash.substring(1));
+            params.set('shot', shotId);
+            if (heading !== null) {
+                params.set('facing', heading);
+            }
+            window.location.hash = params.toString();
+
+            // Wait for view to update
+            await this.delay(500);
+        }
+
+        // Capture current view and extract features (used for multi-view)
+        async captureAndExtractFeatures() {
+            const { mat, width, height, canvas } = this.matcher.capturePanoramaView();
+            const features = this.matcher.extractFeatures(mat);
+            mat.delete();
+            return { features, width, height, canvas };
+        }
+
+        // Multi-view matching: Match against current + neighbor views
+        async matchMultiView(phoneMat, phoneFeatures, progressCallback) {
+            const results = [];
+
+            // Get current shot info
+            const params = new URLSearchParams(window.location.hash.substring(1));
+            const currentShotId = params.get('shot');
+            const currentFacing = parseFloat(params.get('facing') || '0');
+
+            if (!this.neighborShots || this.neighborShots.length === 0) {
+                await this.fetchNeighborShots(currentShotId);
+            }
+
+            // Match against current view first
+            progressCallback('Matching current view...', 40);
+            const currentPano = this.matcher.capturePanoramaView();
+            const currentFeatures = this.matcher.extractFeatures(currentPano.mat);
+
+            const currentMatches = this.matcher.matchFeatures(
+                phoneFeatures.descriptors, currentFeatures.descriptors
+            );
+            const currentGoodMatches = this.matcher.filterMatches(currentMatches);
+
+            if (currentGoodMatches.length >= 8) {
+                const homResult = this.matcher.computeHomographyWithMask(
+                    phoneFeatures.keypoints, currentFeatures.keypoints, currentGoodMatches
+                );
+
+                if (homResult && homResult.inliers >= 4) {
+                    results.push({
+                        shotId: currentShotId,
+                        offset: 0,
+                        matches: currentGoodMatches.length,
+                        inliers: homResult.inliers,
+                        confidence: homResult.inliers / homResult.total,
+                        homography: homResult,
+                        features: currentFeatures,
+                        panoData: currentPano
+                    });
+                }
+            }
+
+            // Match against neighbor shots (sample views at different offsets)
+            const neighborsToMatch = this.neighborShots.filter(s => Math.abs(s.offset) > 0);
+            const step = Math.max(1, Math.floor(neighborsToMatch.length / 4)); // Sample ~4 neighbors
+
+            for (let i = 0; i < neighborsToMatch.length; i += step) {
+                const neighbor = neighborsToMatch[i];
+                progressCallback(`Matching neighbor ${neighbor.offset}...`, 50 + i * 5);
+
+                try {
+                    // Calculate facing toward same scene area
+                    const neighborFacing = currentFacing; // Keep same facing direction
+
+                    // Navigate to neighbor
+                    await this.navigateToShot(neighbor.id, neighborFacing);
+
+                    // Capture and match
+                    const neighborPano = this.matcher.capturePanoramaView();
+                    const neighborFeatures = this.matcher.extractFeatures(neighborPano.mat);
+
+                    const neighborMatches = this.matcher.matchFeatures(
+                        phoneFeatures.descriptors, neighborFeatures.descriptors
+                    );
+                    const neighborGoodMatches = this.matcher.filterMatches(neighborMatches);
+
+                    if (neighborGoodMatches.length >= 8) {
+                        const homResult = this.matcher.computeHomographyWithMask(
+                            phoneFeatures.keypoints, neighborFeatures.keypoints, neighborGoodMatches
+                        );
+
+                        if (homResult && homResult.inliers >= 4) {
+                            results.push({
+                                shotId: neighbor.id,
+                                offset: neighbor.offset,
+                                matches: neighborGoodMatches.length,
+                                inliers: homResult.inliers,
+                                confidence: homResult.inliers / homResult.total,
+                                homography: homResult,
+                                features: neighborFeatures,
+                                panoData: neighborPano
+                            });
+                        }
+                    }
+
+                    neighborPano.mat.delete();
+                } catch (e) {
+                    console.warn(`[PhoneFisheye] Error matching neighbor ${neighbor.id}:`, e);
+                }
+            }
+
+            // Navigate back to original shot
+            await this.navigateToShot(currentShotId, currentFacing);
+
+            // Sort by confidence
+            results.sort((a, b) => b.confidence - a.confidence);
+
+            this.multiViewResults = results;
+            console.log('[PhoneFisheye] Multi-view results:', results.map(r =>
+                `Shot ${r.shotId}: ${r.inliers}/${r.matches} (${(r.confidence * 100).toFixed(0)}%)`
+            ));
+
+            return results;
+        }
+
         onViewChange() {
+            // Get current view parameters from URL
+            const params = new URLSearchParams(window.location.hash.substring(1));
+            this.currentViewParams = {
+                facing: parseFloat(params.get('facing') || '0'),
+                horizon: parseFloat(params.get('horizon') || '0'),
+                fov: parseFloat(params.get('fov') || '90')
+            };
+
             this.updateOverlayPosition();
             this.updateKeypointVisualization();
+        }
+
+        // Convert screen pixel coordinates to spherical (azimuth, elevation)
+        // relative to the panorama sphere
+        screenToSpherical(screenX, screenY, canvasWidth, canvasHeight, viewParams) {
+            const { facing, horizon, fov } = viewParams;
+
+            // Normalize to [-1, 1] range
+            const nx = (screenX / canvasWidth - 0.5) * 2;
+            const ny = -(screenY / canvasHeight - 0.5) * 2; // Flip Y
+
+            // Calculate horizontal and vertical FOV
+            const aspect = canvasWidth / canvasHeight;
+            const vFov = fov;
+            const hFov = vFov * aspect;
+
+            // Calculate offset angles from view center
+            const deltaAz = nx * (hFov / 2);
+            const deltaEl = ny * (vFov / 2);
+
+            // Apply to current view direction
+            const azimuth = (facing + deltaAz + 360) % 360;
+            const elevation = Math.max(-90, Math.min(90, horizon + deltaEl));
+
+            return { azimuth, elevation };
+        }
+
+        // Convert spherical coordinates back to screen pixels
+        sphericalToScreen(azimuth, elevation, canvasWidth, canvasHeight, viewParams) {
+            const { facing, horizon, fov } = viewParams;
+
+            // Calculate horizontal and vertical FOV
+            const aspect = canvasWidth / canvasHeight;
+            const vFov = fov;
+            const hFov = vFov * aspect;
+
+            // Calculate angular distance from view center
+            let deltaAz = azimuth - facing;
+            // Handle wrap-around
+            if (deltaAz > 180) deltaAz -= 360;
+            if (deltaAz < -180) deltaAz += 360;
+
+            const deltaEl = elevation - horizon;
+
+            // Check if point is in view
+            if (Math.abs(deltaAz) > hFov / 2 + 10 || Math.abs(deltaEl) > vFov / 2 + 10) {
+                return null; // Out of view
+            }
+
+            // Convert to normalized screen coordinates
+            const nx = deltaAz / (hFov / 2);
+            const ny = -deltaEl / (vFov / 2); // Flip Y back
+
+            // Convert to pixel coordinates
+            const screenX = (nx / 2 + 0.5) * canvasWidth;
+            const screenY = (ny / 2 + 0.5) * canvasHeight;
+
+            return { x: screenX, y: screenY, inView: true };
+        }
+
+        // Store matched points in spherical coordinates
+        storeSphericalKeypoints(matchedPoints, inlierIndices, canvasWidth, canvasHeight, viewParams) {
+            this.sphericalKeypoints = matchedPoints.map((point, idx) => {
+                const spherical = this.screenToSpherical(
+                    point.pano.x, point.pano.y,
+                    canvasWidth, canvasHeight, viewParams
+                );
+                return {
+                    azimuth: spherical.azimuth,
+                    elevation: spherical.elevation,
+                    isInlier: inlierIndices && inlierIndices.has(idx),
+                    distance: point.distance
+                };
+            });
+            console.log(`[PhoneFisheye] Stored ${this.sphericalKeypoints.length} keypoints in spherical coords`);
+        }
+
+        // Store overlay corners in spherical coordinates
+        storeSphericalCorners(corners, canvasWidth, canvasHeight, viewParams) {
+            this.sphericalCorners = corners.map(corner => {
+                return this.screenToSpherical(
+                    corner.x, corner.y,
+                    canvasWidth, canvasHeight, viewParams
+                );
+            });
+            console.log('[PhoneFisheye] Stored overlay corners in spherical coords');
         }
 
         createButton() {
@@ -1289,6 +1607,21 @@
                     <div class="pf-input-group">
                         <label>Phone FOV (&deg;)</label>
                         <input type="number" class="pf-fov" value="70" min="30" max="120" />
+                    </div>
+                    <div class="pf-input-group">
+                        <label>Detector</label>
+                        <select class="pf-detector">
+                            <option value="akaze">AKAZE (robust)</option>
+                            <option value="orb">ORB (fast)</option>
+                            <option value="both">Both</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="pf-input-row">
+                    <div class="pf-input-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" class="pf-multiview" id="pf-multiview" />
+                        <label for="pf-multiview" style="margin: 0;">Multi-view matching (slower, more robust)</label>
                     </div>
                 </div>
 
@@ -1340,8 +1673,8 @@
                 </div>
 
                 <div class="pf-help">
-                    5000 ORB features + Lowe's ratio test<br>
-                    RANSAC homography + perspective warp
+                    AKAZE/ORB + Lowe's ratio test<br>
+                    Spherical coord tracking + Multi-view
                 </div>
             `;
 
@@ -1389,6 +1722,24 @@
 
             this.panel.querySelector('.pf-fov').addEventListener('change', (e) => {
                 this.estimatedFov = parseFloat(e.target.value) || 70;
+            });
+
+            // Detector selection
+            this.panel.querySelector('.pf-detector').addEventListener('change', (e) => {
+                const value = e.target.value;
+                if (value === 'akaze') {
+                    this.matcher.useAkaze = true;
+                } else if (value === 'orb') {
+                    this.matcher.useAkaze = false;
+                }
+                console.log(`[PhoneFisheye] Detector: ${value}`);
+            });
+
+            // Multi-view toggle
+            this.useMultiView = false;
+            this.panel.querySelector('.pf-multiview').addEventListener('change', (e) => {
+                this.useMultiView = e.target.checked;
+                console.log(`[PhoneFisheye] Multi-view: ${this.useMultiView}`);
             });
 
             // Overlay controls
@@ -1604,10 +1955,26 @@
                 );
                 this.inlierIndices = new Set(homResult.inlierIndices);
 
+                // Get current view parameters for spherical conversion
+                const params = new URLSearchParams(window.location.hash.substring(1));
+                const viewParams = {
+                    facing: parseFloat(params.get('facing') || '0'),
+                    horizon: parseFloat(params.get('horizon') || '0'),
+                    fov: parseFloat(params.get('fov') || '90')
+                };
+                this.currentViewParams = viewParams;
+
+                // STORE KEYPOINTS IN SPHERICAL COORDINATES (view-invariant)
+                this.storeSphericalKeypoints(
+                    this.matchedPoints, this.inlierIndices,
+                    panoW, panoH, viewParams
+                );
+
                 this.lastHomography = {
                     H: homResult.homography,
                     phoneW, phoneH, panoW, panoH,
-                    panoCanvas
+                    panoCanvas,
+                    matchViewParams: viewParams // Remember which view we matched in
                 };
 
                 // Clean up mask
@@ -1680,7 +2047,7 @@
                 this.imageOverlay.remove();
             }
 
-            const { H, phoneW, phoneH, panoW, panoH, panoCanvas } = this.lastHomography;
+            const { H, phoneW, phoneH, panoW, panoH, panoCanvas, matchViewParams } = this.lastHomography;
             const canvasRect = panoCanvas.getBoundingClientRect();
 
             // Get the 4 transformed corners for perspective warp
@@ -1693,7 +2060,14 @@
                 return;
             }
 
-            // Store normalized corners for updates
+            // STORE CORNERS IN SPHERICAL COORDINATES for view-invariant overlay
+            this.storeSphericalCorners(
+                this.warpedCorners,
+                canvasRect.width, canvasRect.height,
+                matchViewParams || this.currentViewParams
+            );
+
+            // Store normalized corners for fallback
             this.lastHomography.normalizedCorners = this.warpedCorners.map(c => ({
                 x: c.x / canvasRect.width,
                 y: c.y / canvasRect.height
@@ -1732,33 +2106,54 @@
 
             ctx.clearRect(0, 0, this.imageOverlay.width, this.imageOverlay.height);
 
-            // Use canvas path clipping and drawImage with perspective
-            // For proper perspective, we'll use a triangulation approach
+            // Use SUBDIVIDED triangles for better perspective rendering
+            // More subdivisions = better approximation of perspective warp
+            const subdivisions = 8; // 8x8 grid of quads = much smoother warp
+
+            const img = this.phoneImage;
+            const imgW = img.width;
+            const imgH = img.height;
+
+            // Bilinear interpolation helper
+            const lerp = (a, b, t) => a + (b - a) * t;
+            const bilinear = (tl, tr, bl, br, u, v) => ({
+                x: lerp(lerp(tl.x, tr.x, u), lerp(bl.x, br.x, u), v),
+                y: lerp(lerp(tl.y, tr.y, u), lerp(bl.y, br.y, u), v)
+            });
+
             ctx.save();
 
-            // Draw the image using perspective triangles
-            // Split the quad into 2 triangles and texture map each
-            this.drawTexturedTriangle(ctx, this.phoneImage,
-                // Source triangle 1 (top-left, top-right, bottom-right)
-                0, 0,
-                this.phoneImage.width, 0,
-                this.phoneImage.width, this.phoneImage.height,
-                // Destination triangle 1
-                corners[0].x, corners[0].y,
-                corners[1].x, corners[1].y,
-                corners[2].x, corners[2].y
-            );
+            // Draw subdivided quads
+            for (let i = 0; i < subdivisions; i++) {
+                for (let j = 0; j < subdivisions; j++) {
+                    const u0 = i / subdivisions;
+                    const u1 = (i + 1) / subdivisions;
+                    const v0 = j / subdivisions;
+                    const v1 = (j + 1) / subdivisions;
 
-            this.drawTexturedTriangle(ctx, this.phoneImage,
-                // Source triangle 2 (top-left, bottom-right, bottom-left)
-                0, 0,
-                this.phoneImage.width, this.phoneImage.height,
-                0, this.phoneImage.height,
-                // Destination triangle 2
-                corners[0].x, corners[0].y,
-                corners[2].x, corners[2].y,
-                corners[3].x, corners[3].y
-            );
+                    // Source quad corners (in image space)
+                    const sx0 = u0 * imgW, sy0 = v0 * imgH;
+                    const sx1 = u1 * imgW, sy1 = v0 * imgH;
+                    const sx2 = u1 * imgW, sy2 = v1 * imgH;
+                    const sx3 = u0 * imgW, sy3 = v1 * imgH;
+
+                    // Destination quad corners (bilinear interpolation of warped corners)
+                    const d0 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v0);
+                    const d1 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v0);
+                    const d2 = bilinear(corners[0], corners[1], corners[3], corners[2], u1, v1);
+                    const d3 = bilinear(corners[0], corners[1], corners[3], corners[2], u0, v1);
+
+                    // Draw two triangles for this quad
+                    this.drawTexturedTriangle(ctx, img,
+                        sx0, sy0, sx1, sy1, sx2, sy2,
+                        d0.x, d0.y, d1.x, d1.y, d2.x, d2.y
+                    );
+                    this.drawTexturedTriangle(ctx, img,
+                        sx0, sy0, sx2, sy2, sx3, sy3,
+                        d0.x, d0.y, d2.x, d2.y, d3.x, d3.y
+                    );
+                }
+            }
 
             // Draw border around the warped quad
             ctx.strokeStyle = '#ff5722';
@@ -1805,19 +2200,44 @@
 
         updateOverlayPosition() {
             // Recalculate overlay position when view changes
-            if (!this.imageOverlay || !this.lastHomography || !this.lastHomography.normalizedCorners) return;
+            if (!this.imageOverlay || !this.lastHomography) return;
 
             const canvas = document.querySelector('canvas');
             if (!canvas) return;
 
             const canvasRect = canvas.getBoundingClientRect();
-            const normalizedCorners = this.lastHomography.normalizedCorners;
 
-            // Recalculate warped corners from normalized positions
-            this.warpedCorners = normalizedCorners.map(c => ({
-                x: c.x * canvasRect.width,
-                y: c.y * canvasRect.height
-            }));
+            // Use SPHERICAL CORNERS for view-invariant overlay positioning
+            if (this.sphericalCorners && this.currentViewParams) {
+                // Convert spherical corners back to screen coordinates
+                const newCorners = this.sphericalCorners.map(sc => {
+                    const screenPos = this.sphericalToScreen(
+                        sc.azimuth, sc.elevation,
+                        canvasRect.width, canvasRect.height,
+                        this.currentViewParams
+                    );
+                    return screenPos || { x: -1000, y: -1000 }; // Off-screen if not visible
+                });
+
+                // Check if all corners are visible
+                const allVisible = newCorners.every(c => c.x >= -100 && c.x <= canvasRect.width + 100);
+
+                if (allVisible) {
+                    this.warpedCorners = newCorners;
+                } else {
+                    // Overlay is out of view, hide it
+                    this.imageOverlay.style.opacity = '0';
+                    return;
+                }
+            } else if (this.lastHomography.normalizedCorners) {
+                // Fallback to normalized corners
+                this.warpedCorners = this.lastHomography.normalizedCorners.map(c => ({
+                    x: c.x * canvasRect.width,
+                    y: c.y * canvasRect.height
+                }));
+            } else {
+                return;
+            }
 
             // Update canvas size and position
             this.imageOverlay.width = canvasRect.width;
@@ -1826,19 +2246,20 @@
             this.imageOverlay.style.top = `${canvasRect.top}px`;
             this.imageOverlay.style.width = `${canvasRect.width}px`;
             this.imageOverlay.style.height = `${canvasRect.height}px`;
+            this.imageOverlay.style.opacity = String(this.overlayOpacity);
 
             // Redraw the warped image
             this.drawWarpedImage();
         }
 
         drawKeypointVisualization() {
-            if (!this.matchedPoints || !this.lastHomography) return;
+            // Use spherical keypoints if available (they track correctly when panning)
+            if (!this.sphericalKeypoints && !this.matchedPoints) return;
 
             const canvas = document.querySelector('canvas');
             if (!canvas) return;
 
             const canvasRect = canvas.getBoundingClientRect();
-            const { panoW, panoH } = this.lastHomography;
 
             // Size and position the keypoint canvas to match the panorama canvas
             this.keypointCanvas.width = canvasRect.width;
@@ -1852,60 +2273,86 @@
             const ctx = this.keypointCanvas.getContext('2d');
             ctx.clearRect(0, 0, this.keypointCanvas.width, this.keypointCanvas.height);
 
-            const scaleX = canvasRect.width / panoW;
-            const scaleY = canvasRect.height / panoH;
-
-            // Draw keypoints as colored dots (like MatchAnything)
-            this.matchedPoints.forEach((point, idx) => {
-                const isInlier = this.inlierIndices && this.inlierIndices.has(idx);
-                const screenX = point.pano.x * scaleX;
-                const screenY = point.pano.y * scaleY;
-
-                // Generate color based on match quality
-                const hue = isInlier ? 120 : 0; // Green for inliers, red for outliers
-                const saturation = 80;
-                const lightness = 50;
-
-                ctx.beginPath();
-                ctx.arc(screenX, screenY, isInlier ? 4 : 3, 0, Math.PI * 2);
-                ctx.fillStyle = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-                ctx.fill();
-
-                // Draw outline for inliers
-                if (isInlier) {
-                    ctx.strokeStyle = 'white';
-                    ctx.lineWidth = 1;
-                    ctx.stroke();
-                }
-            });
-
-            // Draw connecting lines for a subset of matches (to not clutter)
-            const maxLines = Math.min(50, this.matchedPoints.length);
-            const step = Math.ceil(this.matchedPoints.length / maxLines);
-
-            ctx.globalAlpha = 0.3;
-            for (let i = 0; i < this.matchedPoints.length; i += step) {
-                const point = this.matchedPoints[i];
-                const isInlier = this.inlierIndices && this.inlierIndices.has(i);
-
-                if (!isInlier) continue; // Only draw lines for inliers
-
-                const screenX = point.pano.x * scaleX;
-                const screenY = point.pano.y * scaleY;
-
-                // Draw a short line indicating match direction
-                ctx.beginPath();
-                ctx.moveTo(screenX, screenY);
-                ctx.lineTo(screenX + 10, screenY - 10);
-                ctx.strokeStyle = '#4caf50';
-                ctx.lineWidth = 1;
-                ctx.stroke();
+            // Get current view parameters
+            if (!this.currentViewParams) {
+                const params = new URLSearchParams(window.location.hash.substring(1));
+                this.currentViewParams = {
+                    facing: parseFloat(params.get('facing') || '0'),
+                    horizon: parseFloat(params.get('horizon') || '0'),
+                    fov: parseFloat(params.get('fov') || '90')
+                };
             }
-            ctx.globalAlpha = 1.0;
+
+            let inViewCount = 0;
+
+            // Draw keypoints using SPHERICAL coordinates (view-invariant)
+            if (this.sphericalKeypoints) {
+                this.sphericalKeypoints.forEach((kp, idx) => {
+                    // Convert spherical back to screen
+                    const screenPos = this.sphericalToScreen(
+                        kp.azimuth, kp.elevation,
+                        canvasRect.width, canvasRect.height,
+                        this.currentViewParams
+                    );
+
+                    if (!screenPos) return; // Out of current view
+
+                    inViewCount++;
+                    const isInlier = kp.isInlier;
+
+                    // Generate color based on match quality
+                    const hue = isInlier ? 120 : 0; // Green for inliers, red for outliers
+                    const saturation = 80;
+                    const lightness = 50;
+
+                    ctx.beginPath();
+                    ctx.arc(screenPos.x, screenPos.y, isInlier ? 5 : 3, 0, Math.PI * 2);
+                    ctx.fillStyle = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+                    ctx.fill();
+
+                    // Draw outline for inliers
+                    if (isInlier) {
+                        ctx.strokeStyle = 'white';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    }
+                });
+
+                // Update match stats to show visible count
+                if (this.matchStatsEl) {
+                    const totalInliers = this.sphericalKeypoints.filter(k => k.isInlier).length;
+                    this.matchStatsEl.innerHTML = `
+                        Visible: <span class="match-count">${inViewCount}</span> |
+                        Inliers: <span class="inlier-count">${totalInliers}</span>
+                    `;
+                }
+            } else if (this.matchedPoints && this.lastHomography) {
+                // Fallback to original pixel-based drawing
+                const { panoW, panoH } = this.lastHomography;
+                const scaleX = canvasRect.width / panoW;
+                const scaleY = canvasRect.height / panoH;
+
+                this.matchedPoints.forEach((point, idx) => {
+                    const isInlier = this.inlierIndices && this.inlierIndices.has(idx);
+                    const screenX = point.pano.x * scaleX;
+                    const screenY = point.pano.y * scaleY;
+
+                    const hue = isInlier ? 120 : 0;
+                    ctx.beginPath();
+                    ctx.arc(screenX, screenY, isInlier ? 4 : 3, 0, Math.PI * 2);
+                    ctx.fillStyle = `hsl(${hue}, 80%, 50%)`;
+                    ctx.fill();
+                    if (isInlier) {
+                        ctx.strokeStyle = 'white';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                });
+            }
         }
 
         updateKeypointVisualization() {
-            if (this.showKeypoints && this.matchedPoints) {
+            if (this.showKeypoints && (this.sphericalKeypoints || this.matchedPoints)) {
                 this.drawKeypointVisualization();
             }
         }
