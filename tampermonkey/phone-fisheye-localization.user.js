@@ -1589,6 +1589,7 @@
 
         // Convert screen pixel coordinates to spherical (azimuth, elevation)
         // relative to the panorama sphere
+        // Uses CORRECT perspective projection math (tangent-based, not linear)
         screenToSpherical(screenX, screenY, canvasWidth, canvasHeight, viewParams) {
             const { facing, horizon, fov } = viewParams;
 
@@ -1596,14 +1597,26 @@
             const nx = (screenX / canvasWidth - 0.5) * 2;
             const ny = -(screenY / canvasHeight - 0.5) * 2; // Flip Y
 
-            // Calculate horizontal and vertical FOV
+            // Calculate aspect ratio
             const aspect = canvasWidth / canvasHeight;
-            const vFov = fov;
-            const hFov = vFov * aspect;
 
-            // Calculate offset angles from view center
-            const deltaAz = nx * (hFov / 2);
-            const deltaEl = ny * (vFov / 2);
+            // Convert vertical FOV to radians
+            const vFovRad = fov * Math.PI / 180;
+
+            // Calculate horizontal FOV from vertical FOV and aspect ratio
+            // Using the standard camera projection formula
+            const hFovRad = 2 * Math.atan(Math.tan(vFovRad / 2) * aspect);
+
+            // CORRECT perspective projection: use atan for angular offset
+            // In a perspective camera, the relationship between screen position
+            // and angle is: tan(angle) = screen_offset / focal_length
+            // So: angle = atan(normalized_screen_pos * tan(half_fov))
+            const deltaAzRad = Math.atan(nx * Math.tan(hFovRad / 2));
+            const deltaElRad = Math.atan(ny * Math.tan(vFovRad / 2));
+
+            // Convert back to degrees
+            const deltaAz = deltaAzRad * 180 / Math.PI;
+            const deltaEl = deltaElRad * 180 / Math.PI;
 
             // Apply to current view direction
             const azimuth = (facing + deltaAz + 360) % 360;
@@ -1613,13 +1626,16 @@
         }
 
         // Convert spherical coordinates back to screen pixels
+        // Uses CORRECT inverse perspective projection (tangent-based)
         sphericalToScreen(azimuth, elevation, canvasWidth, canvasHeight, viewParams) {
             const { facing, horizon, fov } = viewParams;
 
-            // Calculate horizontal and vertical FOV
+            // Calculate aspect ratio
             const aspect = canvasWidth / canvasHeight;
-            const vFov = fov;
-            const hFov = vFov * aspect;
+
+            // Convert FOV to radians
+            const vFovRad = fov * Math.PI / 180;
+            const hFovRad = 2 * Math.atan(Math.tan(vFovRad / 2) * aspect);
 
             // Calculate angular distance from view center
             let deltaAz = azimuth - facing;
@@ -1629,14 +1645,24 @@
 
             const deltaEl = elevation - horizon;
 
-            // Check if point is in view
-            if (Math.abs(deltaAz) > hFov / 2 + 10 || Math.abs(deltaEl) > vFov / 2 + 10) {
+            // Convert to radians
+            const deltaAzRad = deltaAz * Math.PI / 180;
+            const deltaElRad = deltaEl * Math.PI / 180;
+
+            // Check if point is in view (with some margin)
+            if (Math.abs(deltaAzRad) > hFovRad / 2 + 0.2 || Math.abs(deltaElRad) > vFovRad / 2 + 0.2) {
                 return null; // Out of view
             }
 
-            // Convert to normalized screen coordinates
-            const nx = deltaAz / (hFov / 2);
-            const ny = -deltaEl / (vFov / 2); // Flip Y back
+            // CORRECT inverse perspective projection:
+            // nx = tan(angle) / tan(half_fov)
+            const nx = Math.tan(deltaAzRad) / Math.tan(hFovRad / 2);
+            const ny = -Math.tan(deltaElRad) / Math.tan(vFovRad / 2); // Flip Y back
+
+            // Clamp to valid range
+            if (Math.abs(nx) > 1.2 || Math.abs(ny) > 1.2) {
+                return null;
+            }
 
             // Convert to pixel coordinates
             const screenX = (nx / 2 + 0.5) * canvasWidth;
