@@ -13,7 +13,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @require      https://docs.opencv.org/4.8.0/opencv.js
-// @require      https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -1132,7 +1131,38 @@
             this.loading = false;
             this.processor = null;
             this.model = null;
+            this.transformers = null;
             this.modelName = 'Xenova/clip-vit-base-patch32'; // Good balance of speed/quality
+        }
+
+        // Dynamically load Transformers.js library
+        async loadTransformersLibrary() {
+            if (this.transformers) return this.transformers;
+
+            // Check if already loaded globally
+            if (window.Transformers) {
+                this.transformers = window.Transformers;
+                return this.transformers;
+            }
+
+            console.log('[VisionEmbedder] Loading Transformers.js library...');
+
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
+                script.onload = () => {
+                    // Transformers.js exposes itself as window.Transformers
+                    if (window.Transformers) {
+                        this.transformers = window.Transformers;
+                        console.log('[VisionEmbedder] Transformers.js loaded');
+                        resolve(this.transformers);
+                    } else {
+                        reject(new Error('Transformers.js failed to initialize'));
+                    }
+                };
+                script.onerror = () => reject(new Error('Failed to load Transformers.js'));
+                document.head.appendChild(script);
+            });
         }
 
         async initialize() {
@@ -1140,10 +1170,12 @@
             this.loading = true;
 
             try {
+                // First load the library
+                await this.loadTransformersLibrary();
+
                 console.log('[VisionEmbedder] Loading CLIP model...');
 
-                // Access Transformers.js from global scope
-                const { AutoProcessor, CLIPVisionModelWithProjection } = window.Transformers || self.Transformers;
+                const { AutoProcessor, CLIPVisionModelWithProjection } = this.transformers;
 
                 // Load processor and vision model
                 this.processor = await AutoProcessor.from_pretrained(this.modelName);
@@ -1188,7 +1220,7 @@
                 const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
 
                 // Create RawImage from blob
-                const { RawImage } = window.Transformers || self.Transformers;
+                const { RawImage } = this.transformers;
                 const image = await RawImage.fromBlob(blob);
 
                 // Process image
