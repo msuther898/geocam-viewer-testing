@@ -2636,38 +2636,98 @@
 
             // Method 1: Check for exposed mapView on geocam-map element
             const geocamMap = document.querySelector('geocam-map');
-            if (geocamMap && geocamMap.view) {
-                mapView = geocamMap.view;
+            if (geocamMap) {
+                // Try various property names
+                mapView = geocamMap.view || geocamMap.mapView || geocamMap._view;
+
+                // Check shadow DOM
+                if (!mapView && geocamMap.shadowRoot) {
+                    const shadowView = geocamMap.shadowRoot.querySelector('.esri-view');
+                    if (shadowView && shadowView.__view) {
+                        mapView = shadowView.__view;
+                    }
+                }
             }
 
             // Method 2: Check window for exposed view
-            if (!mapView && window.mapView) {
-                mapView = window.mapView;
+            if (!mapView) {
+                mapView = window.mapView || window.view || window.esriMapView;
             }
 
-            // Method 3: Look for Esri MapView through require (AMD)
+            // Method 3: Look through all esri-view containers
+            if (!mapView) {
+                const esriViews = document.querySelectorAll('.esri-view');
+                for (const viewEl of esriViews) {
+                    if (viewEl.__view) {
+                        mapView = viewEl.__view;
+                        break;
+                    }
+                    // Try getting from parent or child
+                    const container = viewEl.closest('[data-view]') || viewEl.querySelector('[data-view]');
+                    if (container && container.__view) {
+                        mapView = container.__view;
+                        break;
+                    }
+                }
+            }
+
+            // Method 4: Check for AMD require and iterate map instances
             if (!mapView && typeof require !== 'undefined') {
                 try {
-                    const [MapView, GraphicsLayer, Graphic, Point, SimpleMarkerSymbol, PictureMarkerSymbol] = await new Promise((resolve, reject) => {
+                    await new Promise((resolve, reject) => {
                         require([
-                            'esri/views/MapView',
-                            'esri/layers/GraphicsLayer',
-                            'esri/Graphic',
-                            'esri/geometry/Point',
-                            'esri/symbols/SimpleMarkerSymbol',
-                            'esri/symbols/PictureMarkerSymbol'
-                        ], (...modules) => resolve(modules), reject);
+                            'esri/views/MapView'
+                        ], (MapView) => {
+                            // Look for any MapView instance in the DOM
+                            document.querySelectorAll('.esri-view-root, .esri-view').forEach(el => {
+                                // Walk up to find the view container
+                                let current = el;
+                                while (current && !mapView) {
+                                    if (current.__view) {
+                                        mapView = current.__view;
+                                    }
+                                    // Check for view in dataset
+                                    const keys = Object.keys(current);
+                                    for (const key of keys) {
+                                        if (key.startsWith('__') && current[key]?.map) {
+                                            mapView = current[key];
+                                            break;
+                                        }
+                                    }
+                                    current = current.parentElement;
+                                }
+                            });
+                            resolve();
+                        }, reject);
                     });
-
-                    // Find the map view from DOM
-                    const viewContainer = document.querySelector('.esri-view');
-                    if (viewContainer && viewContainer.__view) {
-                        mapView = viewContainer.__view;
-                    }
                 } catch (e) {
                     console.warn('[PhoneFisheye] Could not load ArcGIS modules:', e);
                 }
             }
+
+            // Method 5: Last resort - find by searching object properties
+            if (!mapView) {
+                const mapContainer = document.querySelector('geocam-map') || document.querySelector('.esri-view');
+                if (mapContainer) {
+                    // Search for view in all properties
+                    const searchForView = (obj, depth = 0) => {
+                        if (depth > 3 || !obj) return null;
+                        if (obj.map && obj.center && typeof obj.goTo === 'function') {
+                            return obj;
+                        }
+                        for (const key of Object.keys(obj)) {
+                            if (key.startsWith('_') || key.startsWith('__')) {
+                                const found = searchForView(obj[key], depth + 1);
+                                if (found) return found;
+                            }
+                        }
+                        return null;
+                    };
+                    mapView = searchForView(mapContainer);
+                }
+            }
+
+            console.log('[PhoneFisheye] MapView found:', !!mapView, mapView);
 
             // If no shot coordinates, try to get them
             if (!this.shotCoordinates) {
@@ -2677,6 +2737,7 @@
             // Fallback: If no ArcGIS view found, use the shot coordinates to create a DOM marker
             // that follows the map
             if (!mapView) {
+                console.warn('[PhoneFisheye] Could not find ArcGIS MapView, using fallback');
                 this.addFallbackMapMarker();
                 return;
             }
