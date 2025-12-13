@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.5.0
-// @description  Switch from CLIP to DINOv2 for better local feature matching
+// @version      8.6.0
+// @description  Add thorough search mode and cancel button
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -2361,12 +2361,23 @@
                     </div>
                 </div>
 
+                <div class="pf-input-row">
+                    <div class="pf-input-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" class="pf-thorough" id="pf-thorough" />
+                        <label for="pf-thorough" style="margin: 0;">Thorough search (ALL shots, slower)</label>
+                    </div>
+                </div>
+
                 <button class="pf-btn pf-btn-primary pf-localize-btn" disabled>
                     ${ICONS.search} Match & Overlay
                 </button>
 
                 <button class="pf-btn pf-btn-secondary pf-batch-search-btn" disabled style="background: #9c27b0;">
                     ${ICONS.search} Search ALL Shots
+                </button>
+
+                <button class="pf-btn pf-btn-secondary pf-cancel-search-btn" style="display: none; background: #f44336; color: white;">
+                    ✕ Cancel Search
                 </button>
 
                 <div class="pf-cache-status" style="font-size: 10px; color: #666; margin: 4px 0; display: flex; justify-content: space-between; align-items: center;">
@@ -2527,6 +2538,21 @@
             this.panel.querySelector('.pf-multiview').addEventListener('change', (e) => {
                 this.useMultiView = e.target.checked;
                 console.log(`[PhoneFisheye] Multi-view: ${this.useMultiView}`);
+            });
+
+            // Thorough search toggle
+            this.useThoroughSearch = false;
+            this.panel.querySelector('.pf-thorough').addEventListener('change', (e) => {
+                this.useThoroughSearch = e.target.checked;
+                console.log(`[PhoneFisheye] Thorough search: ${this.useThoroughSearch}`);
+            });
+
+            // Cancel search button
+            this.searchCancelled = false;
+            this.panel.querySelector('.pf-cancel-search-btn').addEventListener('click', () => {
+                this.searchCancelled = true;
+                this.showStatus('Cancelling search...', 'loading');
+                console.log('[PhoneFisheye] Search cancelled by user');
             });
 
             // Overlay controls
@@ -2909,6 +2935,13 @@
             const batchResultsDiv = this.panel.querySelector('.pf-batch-results');
             const batchListDiv = this.panel.querySelector('.pf-batch-list');
             const detailedResultsDiv = this.panel.querySelector('.pf-detailed-results');
+            const cancelBtn = this.panel.querySelector('.pf-cancel-search-btn');
+            const searchBtn = this.panel.querySelector('.pf-batch-search-btn');
+
+            // Show cancel button, hide search button
+            this.searchCancelled = false;
+            cancelBtn.style.display = 'block';
+            searchBtn.style.display = 'none';
 
             batchResultsDiv.style.display = 'block';
             detailedResultsDiv.classList.add('visible');
@@ -2988,9 +3021,17 @@
                     z: f.geometry.z || 0
                 }));
 
-                // Sample shots for CLIP similarity (every Nth shot)
-                const sampleRate = Math.max(1, Math.floor(allShots.length / 150)); // ~150 samples for CLIP
-                const sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
+                // Sample shots for DINOv2 similarity
+                // Thorough mode: ALL shots. Normal mode: ~150 samples
+                let sampledShots;
+                if (this.useThoroughSearch) {
+                    sampledShots = allShots;
+                    console.log(`[BatchSearch] THOROUGH MODE: Processing ALL ${allShots.length} shots`);
+                } else {
+                    const sampleRate = Math.max(1, Math.floor(allShots.length / 150));
+                    sampledShots = allShots.filter((_, i) => i % sampleRate === 0);
+                    console.log(`[BatchSearch] Normal mode: Sampling ${sampledShots.length}/${allShots.length} shots`);
+                }
 
                 // Track stats
                 this.detailedResults.stats.totalShots = allShots.length;
@@ -3042,13 +3083,20 @@
 
                 // Compute embeddings for uncached shots
                 for (let i = 0; i < uncachedShots.length; i++) {
+                    // Check for cancellation
+                    if (this.searchCancelled) {
+                        console.log(`[BatchSearch] Cancelled at DINOv2 stage (${i}/${uncachedShots.length})`);
+                        this.showStatus(`Cancelled after ${i} embeddings`, 'info');
+                        break;
+                    }
+
                     const shot = uncachedShots[i];
                     const progress = 10 + (i / uncachedShots.length) * 40;
                     this.showProgress(progress);
 
-                    if (i % 10 === 0) {
+                    if (i % 10 === 0 || i === 0) {
                         this.showStatus(`DINOv2: ${i + 1}/${uncachedShots.length} (${cachedCount} cached)...`, 'loading');
-                        batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: DINOv2 similarity<br/>📦 ${cachedCount} cached ✓<br/>🔄 Computing ${i + 1}/${uncachedShots.length}...</div>`;
+                        batchListDiv.innerHTML = `<div style="color: #666;">Stage 1: DINOv2 similarity<br/>📦 ${cachedCount} cached ✓<br/>🔄 Computing ${i + 1}/${uncachedShots.length}...<br/><em style="font-size:9px;">(Click Cancel to stop)</em></div>`;
                     }
 
                     try {
@@ -3156,6 +3204,13 @@
                 }
 
                 for (let i = 0; i < topCandidates.length; i++) {
+                    // Check for cancellation
+                    if (this.searchCancelled) {
+                        console.log(`[BatchSearch] Cancelled at ORB stage (${i}/${topCandidates.length})`);
+                        this.showStatus(`Cancelled after ${i} ORB verifications`, 'info');
+                        break;
+                    }
+
                     const shot = topCandidates[i];
                     const progress = 55 + (i / topCandidates.length) * 40;
                     this.showProgress(progress);
@@ -3307,6 +3362,14 @@
                 this.showStatus(`Search failed: ${err.message}`, 'error');
             } finally {
                 this.isMatching = false;
+                this.searchCancelled = false;
+
+                // Reset buttons
+                const cancelBtn = this.panel.querySelector('.pf-cancel-search-btn');
+                const searchBtn = this.panel.querySelector('.pf-batch-search-btn');
+                cancelBtn.style.display = 'none';
+                searchBtn.style.display = 'block';
+
                 // Update cache status after search
                 this.updateCacheStatus();
             }
