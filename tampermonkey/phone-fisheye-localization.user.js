@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoCam Phone Fisheye Localization
 // @namespace    https://geocam.xyz/
-// @version      8.2.0
-// @description  CLIP semantic search with debug logging and cache
+// @version      8.3.0
+// @description  CLIP filter + inlier-weighted scoring (inliers primary, CLIP secondary)
 // @author       GeoCam
 // @match        https://production.geocam.io/*
 // @match        https://*.geocam.io/viewer/*
@@ -2791,8 +2791,8 @@
                         params.set('fov', String(searchFov));
                         window.location.hash = params.toString();
 
-                        // Wait for view to load
-                        await this.delay(200);
+                        // Wait for view to FULLY load (increased from 200ms)
+                        await this.delay(400);
 
                         // Capture and get embedding
                         const panoCanvas = this.embedder.capturePanoCanvas();
@@ -2889,9 +2889,16 @@
                                     phoneFeatures.keypoints, panoFeatures.keypoints, goodMatches
                                 );
 
-                                if (homResult && homResult.inliers >= 4) {
-                                    // Combined score: CLIP similarity + geometric inliers
-                                    const combinedScore = (shot.similarity * 100) + (homResult.inliers * 0.5);
+                                // Require minimum 15 inliers for a valid match
+                                if (homResult && homResult.inliers >= 15) {
+                                    // INLIERS are PRIMARY - CLIP is just for filtering
+                                    // Inliers range: 15-200+, so weight heavily
+                                    // CLIP range: 0.85-0.95, so normalize as small bonus
+                                    const inlierScore = homResult.inliers * 2;  // Primary factor
+                                    const clipBonus = (shot.similarity - 0.8) * 50; // Small bonus for CLIP
+                                    const combinedScore = inlierScore + clipBonus;
+
+                                    console.log(`[BatchSearch] Shot ${shot.id}: ${homResult.inliers} inliers, ${(shot.similarity*100).toFixed(0)}% sim → score ${combinedScore.toFixed(1)}`);
 
                                     this.batchResults.push({
                                         shotId: shot.id,
@@ -2906,6 +2913,8 @@
                                     });
 
                                     this.updateBatchResultsDisplay(batchListDiv);
+                                } else if (homResult) {
+                                    console.log(`[BatchSearch] Shot ${shot.id}: only ${homResult.inliers} inliers (need 15+)`);
                                 }
 
                                 if (homResult?.mask) homResult.mask.delete();
